@@ -32,6 +32,7 @@ public static class SettingsService
                 if (loaded != null)
                 {
                     Sanitize(loaded);
+                    Migrate(loaded);
                     return loaded;
                 }
             }
@@ -41,6 +42,24 @@ public static class SettingsService
             AppLog.Error(ex, "读取设置失败,使用默认设置");
         }
         return NewDefault();
+    }
+
+    /// <summary>旧版本迁移:v1 默认窗口 720 宽放不下设备行,升级到 v2 的大窗口默认。</summary>
+    private static void Migrate(AppSettings s)
+    {
+        if (s.Version < 2)
+        {
+            s.Version = 2;
+            if (s.WindowWidth < 960)
+            {
+                s.WindowWidth = 1080;
+            }
+            if (s.WindowHeight < 640)
+            {
+                s.WindowHeight = 680;
+            }
+            AppLog.Info("设置迁移 v1→v2:窗口默认尺寸调整为 1080×680");
+        }
     }
 
     public static void Save(AppSettings settings)
