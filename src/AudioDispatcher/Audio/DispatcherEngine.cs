@@ -45,9 +45,35 @@ public sealed class DispatcherEngine : IDisposable
     // 目标启动失败/中断的退避重试(熄屏恢复、设备未就绪等场景)
     private readonly Dictionary<string, DateTime> _retryAfter = new();
     private readonly Dictionary<string, int> _retryCount = new();
+    private readonly HashSet<string> _startingIds = new(); // 已排队启动(防巡检/StartAll 重复入队)
     private DateTime _lastVolumeWarnUtc = DateTime.MinValue;
     private DateTime _lastLockStallWarnUtc = DateTime.MinValue;
     private readonly DateTime _engineBornUtc = DateTime.UtcNow;
+    // ---- 后台音频操作执行器:引擎锁内永不执行音频 COM ----
+    // 设备唤醒/失效瞬间 WasapiOut/WasapiCapture 的 Start/Stop/Dispose 可能永久挂起,
+    // 若发生在锁内会拖死整个引擎与 UI;一律排队到此串行队列执行。
+    private readonly object _execLock = new();
+    private Task _execTail = Task.CompletedTask;
+
+    private void EnqueueAudioOp(Action op)
+    {
+        lock (_execLock)
+        {
+            _execTail = _execTail.ContinueWith(
+                _ =>
+                {
+                    try
+                    {
+                        op();
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Warn($"后台音频操作异常: {ex.Message}");
+                    }
+                },
+                TaskScheduler.Default);
+        }
+    }
     // 设备列表后台刷新(锁内零 COM):通知只调度,枚举在独立线程执行,挂起可超时自愈
     private volatile bool _refreshRunning;
     private DateTime _refreshStartedUtc = DateTime.MinValue;
@@ -287,12 +313,24 @@ public sealed class DispatcherEngine : IDisposable
 
     // ================= 内部:结构管理(持 _lock) =================
 
+    /// <summary>确保源在跑(锁内纯检查+调度;真实 COM 启动在后台执行器完成)。</summary>
     private bool TryEnsureSourceLocked()
     {
         if (_source != null)
         {
             return true;
         }
+        var id = PickSourceIdLocked();
+        if (string.IsNullOrEmpty(id))
+        {
+            return false;
+        }
+        EnqueueAudioOp(() => DoEnsureSource(id));
+        return true; // 异步就绪(通常数百 ms 内)
+    }
+
+    private string? PickSourceIdLocked()
+    {
         // 用缓存候选(后台刷新填充),锁内不做 COM 枚举
         var candidates = _sourceCandidates;
         var id = _settings.SourceDeviceId;
@@ -301,29 +339,55 @@ public sealed class DispatcherEngine : IDisposable
             id = candidates.Count == 1 ? candidates[0].Id :
                  candidates.FirstOrDefault(c => c.Id == _settings.SourceDeviceId)?.Id ?? "";
         }
-        if (string.IsNullOrEmpty(id))
-        {
-            return false;
-        }
-        var device = _devices.OpenSourceDevice(id);
-        if (device == null)
-        {
-            return false;
-        }
+        return string.IsNullOrEmpty(id) ? null : id;
+    }
+
+    /// <summary>后台执行器:打开并启动源捕获(COM,可能挂起,只影响执行器队列)。</summary>
+    private void DoEnsureSource(string deviceId)
+    {
+        SourceCapture? source = null;
         try
         {
-            var source = new SourceCapture(device);
+            var device = _devices.OpenSourceDevice(deviceId);
+            if (device == null)
+            {
+                AppLog.Warn("源设备打开失败(后台),将按看门狗节奏重试");
+                return;
+            }
+            source = new SourceCapture(device);
             source.SamplesReady += OnSamplesReady;
             source.Start();
-            _source = source;
-            return true;
+            lock (_lock)
+            {
+                if (_source != null)
+                {
+                    // 竞态:已有源就绪,释放本次创建的
+                    var s = source;
+                    source = null;
+                    EnqueueAudioOp(() =>
+                    {
+                        try { s.Dispose(); }
+                        catch { }
+                    });
+                    return;
+                }
+                _source = source;
+                source = null;
+                if (_running)
+                {
+                    _lastDataUtc = DateTime.UtcNow;
+                    _lastContentUtc = DateTime.UtcNow;
+                }
+            }
         }
         catch (Exception ex)
         {
-            AppLog.Error(ex, "源捕获启动失败");
-            device.Dispose();
-            _source = null;
-            return false;
+            AppLog.Warn($"源捕获启动失败(后台): {ex.Message}");
+            if (source != null)
+            {
+                try { source.Dispose(); }
+                catch { }
+            }
         }
     }
 
@@ -338,9 +402,10 @@ public sealed class DispatcherEngine : IDisposable
         }
     }
 
+    /// <summary>计划启动目标(锁内纯检查+调度;真实 COM 启动在后台执行器)。</summary>
     private void TryStartTargetLocked(string deviceId)
     {
-        if (_targetById.ContainsKey(deviceId))
+        if (_targetById.ContainsKey(deviceId) || _startingIds.Contains(deviceId))
         {
             return;
         }
@@ -348,32 +413,92 @@ public sealed class DispatcherEngine : IDisposable
         {
             return; // 退避期内
         }
-        var device = _devices.OpenRenderDevice(deviceId);
-        if (device == null)
+        if (_source == null)
         {
-            BackoffLocked(deviceId);
-            _errors[deviceId] = "设备不存在";
             return;
         }
+        _startingIds.Add(deviceId);
+        var sourceRate = _source.SampleRate;
+        var bufferMs = _bufferMs;
+        EnqueueAudioOp(() => DoStartTarget(deviceId, sourceRate, bufferMs));
+    }
+
+    /// <summary>后台执行器:打开并启动目标渲染流(COM,可能挂起,只影响执行器队列)。</summary>
+    private void DoStartTarget(string deviceId, int sourceRate, int bufferMs)
+    {
+        MMDevice? device = null;
+        TargetOutput? target = null;
         try
         {
-            var target = new TargetOutput(device, _source!.SampleRate);
-            target.PlaybackStopped += ex => OnTargetPlaybackStopped(target, ex);
-            target.Start(_bufferMs);
-            _targets.Add(target);
-            _targetById[deviceId] = target;
-            _targetSnapshot = _targets.ToArray(); // 持锁刷新音频线程快照
-            ClearBackoffLocked(deviceId);
-            _errors.Remove(deviceId);
-            AppLog.Info($"目标启动: {target.Name}");
+            device = _devices.OpenRenderDevice(deviceId);
+            if (device == null)
+            {
+                lock (_lock)
+                {
+                    BackoffLocked(deviceId);
+                    _errors[deviceId] = "设备不存在";
+                }
+                return;
+            }
+            target = new TargetOutput(device, sourceRate);
+            var startedId = target.DeviceId;
+            Action<Exception?> handler = null!;
+            handler = ex => OnTargetPlaybackStopped(startedId, ex);
+            target.PlaybackStopped += handler;
+            target.Start(bufferMs);
+            lock (_lock)
+            {
+                if (!_running || _targetById.ContainsKey(deviceId))
+                {
+                    // 引擎已停止或该路已被其它路径启动:释放本次创建的流(退订,避免误触发中断回调)
+                    var t = target;
+                    target = null;
+                    t.PlaybackStopped -= handler;
+                    EnqueueAudioOp(() =>
+                    {
+                        try { t.Dispose(); }
+                        catch { }
+                    });
+                    return;
+                }
+                _targets.Add(target);
+                _targetById[deviceId] = target;
+                _targetSnapshot = _targets.ToArray(); // 持锁刷新音频线程快照
+                _startingIds.Remove(deviceId);
+                ClearBackoffLocked(deviceId);
+                _errors.Remove(deviceId);
+                AppLog.Info($"目标启动: {target.Name}");
+                target = null;
+                device = null;
+            }
         }
         catch (Exception ex)
         {
-            BackoffLocked(deviceId);
-            _errors[deviceId] = ex.Message;
-            device.Dispose();
+            lock (_lock)
+            {
+                _startingIds.Remove(deviceId);
+                BackoffLocked(deviceId);
+                _errors[deviceId] = ex.Message;
+            }
             AppLog.Warn($"目标启动失败(将退避重试): {deviceId}: {ex.Message}");
             TargetError?.Invoke(deviceId, ex.Message);
+        }
+        finally
+        {
+            lock (_lock)
+            {
+                _startingIds.Remove(deviceId);
+            }
+            if (target != null)
+            {
+                try { target.Dispose(); }
+                catch { }
+            }
+            else if (device != null)
+            {
+                try { device.Dispose(); }
+                catch { }
+            }
         }
     }
 
@@ -391,21 +516,29 @@ public sealed class DispatcherEngine : IDisposable
         _retryCount.Remove(deviceId);
     }
 
-    /// <summary>渲染流意外中断(设备会话失效,如 HDMI 熄屏/驱动重置)→ 停掉该路并按退避自动重启。</summary>
-    private void OnTargetPlaybackStopped(TargetOutput target, Exception? ex)
+    /// <summary>渲染流意外中断(设备会话失效,如 HDMI 熄屏/驱动重置)→ 停掉该路并按退避自动重启。
+    /// 由 NAudio 播放线程回调,须快速返回且不得抛异常。</summary>
+    private void OnTargetPlaybackStopped(string deviceId, Exception? ex)
     {
-        lock (_lock)
+        try
         {
-            if (!_targetById.ContainsKey(target.DeviceId))
+            lock (_lock)
             {
-                return; // 引擎主动停止(已移除),忽略 NAudio 停止事件
+                if (!_targetById.ContainsKey(deviceId))
+                {
+                    return; // 引擎主动停止(已移除),忽略 NAudio 停止事件
+                }
+                StopTargetLocked(deviceId, "播放中断");
+                BackoffLocked(deviceId);
+                var msg = ex != null ? $"播放中断: {ex.Message}" : "播放中断";
+                _errors[deviceId] = msg;
+                AppLog.Warn($"目标播放中断,退避重试: {deviceId}: {ex?.Message}");
+                TargetError?.Invoke(deviceId, "设备会话中断,正在自动恢复…");
             }
-            StopTargetLocked(target.DeviceId, "播放中断");
-            BackoffLocked(target.DeviceId);
-            var msg = ex != null ? $"播放中断: {ex.Message}" : "播放中断";
-            _errors[target.DeviceId] = msg;
-            AppLog.Warn($"目标播放中断,退避重试: {target.Name}: {ex?.Message}");
-            TargetError?.Invoke(target.DeviceId, "设备会话中断,正在自动恢复…");
+        }
+        catch (Exception callbackEx)
+        {
+            AppLog.Error(callbackEx, "播放中断回调处理异常");
         }
     }
 
@@ -452,15 +585,13 @@ public sealed class DispatcherEngine : IDisposable
         {
             _targets.Remove(t);
             _targetSnapshot = _targets.ToArray(); // 持锁刷新音频线程快照
-            try
-            {
-                t.Dispose();
-            }
-            catch (Exception ex)
-            {
-                AppLog.Warn($"目标 {deviceId} 停止异常: {ex.Message}");
-            }
             AppLog.Info($"目标停止({reason}): {deviceId}");
+            // Dispose(COM)在后台执行器释放,锁内不碰音频
+            EnqueueAudioOp(() =>
+            {
+                try { t.Dispose(); }
+                catch (Exception ex) { AppLog.Warn($"目标 {deviceId} 释放异常: {ex.Message}"); }
+            });
         }
     }
 
@@ -489,14 +620,12 @@ public sealed class DispatcherEngine : IDisposable
             _source.SamplesReady -= OnSamplesReady;
             var s = _source;
             _source = null;
-            try
+            // Dispose(COM)在后台执行器释放,锁内不碰音频
+            EnqueueAudioOp(() =>
             {
-                s.Dispose();
-            }
-            catch (Exception ex)
-            {
-                AppLog.Warn($"源停止异常({reason}): {ex.Message}");
-            }
+                try { s.Dispose(); }
+                catch (Exception ex) { AppLog.Warn($"源释放异常({reason}): {ex.Message}"); }
+            });
         }
     }
 
@@ -809,10 +938,27 @@ public sealed class DispatcherEngine : IDisposable
     {
         _watchdog.Dispose();
         _devices.Changed -= OnDevicesChanged;
+        List<IDisposable> toDispose;
         lock (_lock)
         {
-            StopAllLocked("引擎销毁");
+            toDispose = _targets.Cast<IDisposable>().ToList();
+            _targets.Clear();
+            _targetById.Clear();
+            _targetSnapshot = System.Array.Empty<TargetOutput>();
+            if (_source != null)
+            {
+                _source.SamplesReady -= OnSamplesReady;
+                toDispose.Add(_source);
+                _source = null;
+            }
             _errors.Clear();
+            _silent = false;
+        }
+        // 退出路径:同步释放(进程即将结束,允许短暂阻塞)
+        foreach (var d in toDispose)
+        {
+            try { d.Dispose(); }
+            catch { }
         }
     }
 }
