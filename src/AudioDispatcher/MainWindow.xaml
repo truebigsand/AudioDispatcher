@@ -45,7 +45,7 @@
                                    FontSize="13" VerticalAlignment="Center"
                                    Foreground="{Binding SourceBrush}" TextTrimming="CharacterEllipsis"/>
                     </StackPanel>
-                    <TextBlock Text="系统默认输出设为 CABLE Input 后,进入虚拟声卡的声音会在此镜像分发到勾选的设备"
+                    <TextBlock Text="系统默认输出设为 VB-Audio 虚拟声卡(显示如「扬声器 (VB-Audio Virtual Cable)」)后,进入的声音会在此镜像分发到勾选的设备"
                                FontSize="11" Foreground="#888" Margin="0,3,0,0"/>
                 </StackPanel>
 
@@ -79,7 +79,7 @@
                     <Run Text="1."/><Run Text=" 从"/>
                     <Hyperlink Click="OnOpenDownloadLink">vb-audio.com/Cable</Hyperlink>
                     <Run Text="下载并安装(免费);"/><LineBreak/>
-                    <Run Text="2."/><Run Text=" 系统声音设置 → 输出 中把默认设备选为 CABLE Input (VB-Audio Virtual Cable);"/><LineBreak/>
+                    <Run Text="2."/><Run Text=" 系统声音设置 → 输出 中把默认设备选为 VB-Audio 虚拟声卡播放端(新版显示为「扬声器 (VB-Audio Virtual Cable)」,即 CABLE Input);"/><LineBreak/>
                     <Run Text="3."/><Run Text=" 回到本窗口勾选要同时出声的设备,点「开始分发」。"/>
                 </TextBlock>
             </StackPanel>

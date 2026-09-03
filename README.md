@@ -8,14 +8,14 @@ Windows 多音频设备输出工具:捕获进入 **VB-Audio Cable** 虚拟声卡
 
 ## 快速开始
 
-1. **安装 VB-Audio Cable**(免费):从 [vb-audio.com/Cable](https://vb-audio.com/Cable/) 下载 `VBCABLE_Driver_Pack45.zip`,解压后按其中 readme 说明安装驱动(**装完需重启**)。装好后系统会多出两个端点:
-   - `CABLE Input (VB-Audio Virtual Cable)`(播放)
-   - `CABLE Output (VB-Audio Virtual Cable)`(录制)
+1. **安装 VB-Audio Cable**(免费):从 [vb-audio.com/Cable](https://vb-audio.com/Cable/) 下载 `VBCABLE_Driver_Pack45.zip`,解压后按其中 readme 说明安装驱动(**装完需重启**)。装好后系统里会出现 VB-Audio 虚拟声卡的端点,名称随驱动版本略有差异:
+   - 播放端(进线):新版 16ch 驱动在声音设置里显示为 **`扬声器 (VB-Audio Virtual Cable)`**(旧版名为 `CABLE Input (VB-Audio Virtual Cable)`;另有 `CABLE In 16 Ch (VB-Audio Virtual Cable)` 多通道端点,同样可作进线);
+   - 录制端(出线):**`CABLE Output (VB-Audio Virtual Cable)`** —— AudioDispatcher 从这里取声音。
 2. 打开 AudioDispatcher(首次运行会显示引导)。
-3. 系统 **声音设置 → 输出** 把默认播放设备选为 **CABLE Input (VB-Audio Virtual Cable)**——所有系统声音由此进入分发器。
+3. 系统 **声音设置 → 输出** 把默认播放设备选为 VB-Audio 虚拟声卡的播放端(显示名形如 **`扬声器 (VB-Audio Virtual Cable)`**,即 CABLE 进线)——所有系统声音由此进入分发器。
 4. 回到 AudioDispatcher,勾选要同时出声的设备(可逐个调音量/静音/听测试音),点 **开始分发**。
 
-> 注意:分发器运行期间系统声音都走 CABLE,退出 AudioDispatcher 后如仍指向 CABLE Input 会没有声音——请先切回原设备再退出(退出确认框会提醒)。
+> 注意:分发器运行期间系统声音都走 CABLE 虚拟声卡,退出 AudioDispatcher 后若默认输出仍指向它(它的进线无人取走)会没有声音——请先切回原设备再退出(退出确认框会提醒)。
 
 ## 功能
 
