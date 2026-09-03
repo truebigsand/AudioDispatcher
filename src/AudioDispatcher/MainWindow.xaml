@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:AudioDispatcher.UI.ViewModels"
         Title="AudioDispatcher - 多设备音频分发"
+        Icon="pack://application:,,,/Assets/app.ico"
         Width="1080" Height="680" MinWidth="900" MinHeight="560"
         WindowStartupLocation="CenterScreen"
         Background="#F5F6F8">

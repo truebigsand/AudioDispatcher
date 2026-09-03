@@ -36,6 +36,9 @@ Windows 多音频设备输出工具:捕获进入 **VB-Audio Cable** 虚拟声卡
 # 调试
 dotnet build src/AudioDispatcher/AudioDispatcher.csproj
 
+# 重新生成应用图标(exe/窗口标题栏:绿色圆底 + 声波三弧,输出到 Assets/app.ico)
+dotnet run --project scripts/icon-gen
+
 # 发布(脚本自动复制产物到 桌面\Claude Outputs\AudioDispatcher\)
 powershell -ExecutionPolicy Bypass -File scripts/publish-fd.ps1          # 框架依赖,~1MB(需 .NET 10 Desktop Runtime)
 powershell -ExecutionPolicy Bypass -File scripts/publish-standalone.ps1  # 自包含单文件,~67MB(免运行时)

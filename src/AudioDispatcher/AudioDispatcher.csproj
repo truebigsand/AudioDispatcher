@@ -12,6 +12,7 @@
     <RootNamespace>AudioDispatcher</RootNamespace>
     <Version>0.1.0</Version>
     <StartupObject>AudioDispatcher.Program</StartupObject>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
   </PropertyGroup>
 
@@ -23,6 +24,10 @@
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\app.ico" />
   </ItemGroup>
 
 </Project>
