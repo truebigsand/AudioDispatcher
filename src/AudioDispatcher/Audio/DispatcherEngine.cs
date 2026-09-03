@@ -46,6 +46,8 @@ public sealed class DispatcherEngine : IDisposable
     private readonly Dictionary<string, DateTime> _retryAfter = new();
     private readonly Dictionary<string, int> _retryCount = new();
     private DateTime _lastVolumeWarnUtc = DateTime.MinValue;
+    private DateTime _lastLockStallWarnUtc = DateTime.MinValue;
+    private readonly DateTime _engineBornUtc = DateTime.UtcNow;
     // 设备列表后台刷新(锁内零 COM):通知只调度,枚举在独立线程执行,挂起可超时自愈
     private volatile bool _refreshRunning;
     private DateTime _refreshStartedUtc = DateTime.MinValue;
@@ -677,75 +679,107 @@ public sealed class DispatcherEngine : IDisposable
     {
         try
         {
-            lock (_lock)
+            // 锁争用探测:若锁被长期持有(某调用卡在锁内)则记录并跳过本轮,不阻塞看门狗。
+            // 启动 8s 内豁免(自动开始分发时锁内做设备初始化,属正常长锁)。
+            var engineAge = DateTime.UtcNow - _engineBornUtc;
+            bool entered;
+            if (engineAge.TotalSeconds > 8)
             {
-                if (!_running)
+                entered = Monitor.TryEnter(_lock, TimeSpan.FromMilliseconds(800));
+            }
+            else
+            {
+                Monitor.Enter(_lock);
+                entered = true;
+            }
+            if (!entered)
+            {
+                var now0 = DateTime.UtcNow;
+                if (now0 - _lastLockStallWarnUtc > TimeSpan.FromSeconds(10))
                 {
-                    return;
+                    _lastLockStallWarnUtc = now0;
+                    AppLog.Warn("引擎锁争用:持锁调用疑似卡住(>800ms),本轮巡检跳过");
                 }
-                var now = DateTime.UtcNow;
-                // 周期保底:通知之外的候选刷新(熄屏恢复不依赖通知)
-                ScheduleListRefresh(immediate: false);
-
-                if (_source == null || !_source.IsRunning)
-                {
-                    // 源失效:尝试重建(限频 10s)
-                    TryRestartSourceLocked();
-                    return;
-                }
-
-                // 0) 目标周期巡检(熄屏/断线恢复不依赖通知事件)
-                if ((now - _lastTargetScanUtc).TotalSeconds >= 2)
-                {
-                    _lastTargetScanUtc = now;
-                    TargetMaintenanceLocked();
-                }
-
-                // 1) 设备级故障:数据帧完全停止 6s → 重建捕获
-                var frames = _source.TotalFrames;
-                var hasFrames = frames != _lastWatchFrames;
-                _lastWatchFrames = frames;
-                if (!hasFrames && now - _lastDataUtc > TimeSpan.FromSeconds(6))
-                {
-                    AppLog.Warn("源数据帧停止超过 6s,尝试重建捕获");
-                    TryRestartSourceLocked();
-                    _lastDataUtc = now;
-                    return;
-                }
-                if (hasFrames)
-                {
-                    _lastDataUtc = now;
-                }
-
-                // 2) 内容级静默:帧在流动但都是静音(如无应用播放)→ 目标静默
-                var hasContent = _source.LastLevelRms > 0.001f; // ≈ -60 dBFS
-                if (hasContent)
-                {
-                    _lastContentUtc = now;
-                    if (_silent)
-                    {
-                        _silent = false;
-                        foreach (var t in _targets)
-                        {
-                            t.ResumeFromSilence();
-                        }
-                        AppLog.Info("源声音内容恢复,退出静默");
-                    }
-                }
-                else if (!_silent && now - _lastContentUtc > TimeSpan.FromSeconds(1))
-                {
-                    _silent = true;
-                    foreach (var t in _targets)
-                    {
-                        t.EnterSilentMode();
-                    }
-                    AppLog.Warn("源无声音内容超过 1s(无应用在播放),目标进入静默");
-                }
+                return;
+            }
+            try
+            {
+                OnTickLocked();
+            }
+            finally
+            {
+                Monitor.Exit(_lock);
             }
         }
         catch (Exception ex)
         {
             AppLog.Error(ex, "看门狗异常");
+        }
+    }
+
+    private void OnTickLocked()
+    {
+        if (!_running)
+        {
+            return;
+        }
+        var now = DateTime.UtcNow;
+        // 周期保底:通知之外的候选刷新(熄屏恢复不依赖通知)
+        ScheduleListRefresh(immediate: false);
+
+        if (_source == null || !_source.IsRunning)
+        {
+            // 源失效:尝试重建(限频 10s)
+            TryRestartSourceLocked();
+            return;
+        }
+
+        // 0) 目标周期巡检(熄屏/断线恢复不依赖通知事件)
+        if ((now - _lastTargetScanUtc).TotalSeconds >= 2)
+        {
+            _lastTargetScanUtc = now;
+            TargetMaintenanceLocked();
+        }
+
+        // 1) 设备级故障:数据帧完全停止 6s → 重建捕获
+        var frames = _source.TotalFrames;
+        var hasFrames = frames != _lastWatchFrames;
+        _lastWatchFrames = frames;
+        if (!hasFrames && now - _lastDataUtc > TimeSpan.FromSeconds(6))
+        {
+            AppLog.Warn("源数据帧停止超过 6s,尝试重建捕获");
+            TryRestartSourceLocked();
+            _lastDataUtc = now;
+            return;
+        }
+        if (hasFrames)
+        {
+            _lastDataUtc = now;
+        }
+
+        // 2) 内容级静默:帧在流动但都是静音(如无应用播放)→ 目标静默
+        var hasContent = _source.LastLevelRms > 0.001f; // ≈ -60 dBFS
+        if (hasContent)
+        {
+            _lastContentUtc = now;
+            if (_silent)
+            {
+                _silent = false;
+                foreach (var t in _targets)
+                {
+                    t.ResumeFromSilence();
+                }
+                AppLog.Info("源声音内容恢复,退出静默");
+            }
+        }
+        else if (!_silent && now - _lastContentUtc > TimeSpan.FromSeconds(1))
+        {
+            _silent = true;
+            foreach (var t in _targets)
+            {
+                t.EnterSilentMode();
+            }
+            AppLog.Warn("源无声音内容超过 1s(无应用在播放),目标进入静默");
         }
     }
 

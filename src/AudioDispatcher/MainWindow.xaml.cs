@@ -21,6 +21,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _slowTimer;
     private readonly DispatcherTimer _saveTimer;
     private readonly DispatcherTimer _volumeCommitTimer;
+    private readonly DispatcherTimer _uiHeartbeatTimer;
+    private DateTime _lastHeartbeatUtc = DateTime.MinValue;
     private readonly Dictionary<string, double> _pendingVolumes = new();
     private bool _volumeSyncRunning;
     private bool _suppressRowEvents;
@@ -64,6 +66,23 @@ public partial class MainWindow : Window
             _saveTimer.Stop();
             SettingsService.Save(_settings);
         };
+
+        // UI 心跳:DispatcherTimer 由 UI 线程驱动,若两次 tick 间隔拉长说明 UI 线程被阻塞
+        _uiHeartbeatTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000) };
+        _uiHeartbeatTimer.Tick += (_, _) =>
+        {
+            var now = DateTime.UtcNow;
+            if (_lastHeartbeatUtc != DateTime.MinValue)
+            {
+                var gap = (now - _lastHeartbeatUtc).TotalSeconds;
+                if (gap > 2.5)
+                {
+                    AppLog.Warn($"UI 心跳中断 {gap:0.0}s(UI 线程被阻塞)");
+                }
+            }
+            _lastHeartbeatUtc = now;
+        };
+        _uiHeartbeatTimer.Start();
 
         Closing += OnClosing;
         Loaded += OnLoaded;
