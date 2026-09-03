@@ -163,7 +163,8 @@ public sealed class DeviceService : IDisposable
                 return;
             }
             _pending = true;
-            _throttle.Change(300, Timeout.Infinite);
+            // 800ms 合并窗口:熄屏重开瞬间端点反复 Active/Unplugged 的通知风暴只触发一次处理
+            _throttle.Change(800, Timeout.Infinite);
         }
     }
 

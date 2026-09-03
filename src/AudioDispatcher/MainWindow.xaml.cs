@@ -33,8 +33,8 @@ public partial class MainWindow : Window
         _vm = new MainViewModel(engine, settings);
         DataContext = _vm;
 
-        _engine.EndpointsChanged += () => DispatchUi(_vm.RefreshDevices);
-        _engine.SourceCandidatesChanged += () => DispatchUi(_vm.RefreshSourceState);
+        _engine.EndpointsChanged += QueueRefreshDevices;
+        _engine.SourceCandidatesChanged += QueueRefreshSourceState;
 
         _realtimeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
         _realtimeTimer.Tick += (_, _) => _vm.RefreshRealtime();
@@ -65,6 +65,38 @@ public partial class MainWindow : Window
         UpdateLatencyHint();
         _vm.RefreshDevices();
         _vm.RefreshSourceState();
+    }
+
+    private bool _refreshDevicesQueued;
+    private bool _refreshSourceQueued;
+
+    /// <summary>设备列表刷新入队(合并):通知风暴下 UI 队列只保留一次重建,防雪崩卡死。</summary>
+    private void QueueRefreshDevices()
+    {
+        if (_refreshDevicesQueued)
+        {
+            return;
+        }
+        _refreshDevicesQueued = true;
+        Dispatcher.BeginInvoke(() =>
+        {
+            _refreshDevicesQueued = false;
+            _vm.RefreshDevices();
+        });
+    }
+
+    private void QueueRefreshSourceState()
+    {
+        if (_refreshSourceQueued)
+        {
+            return;
+        }
+        _refreshSourceQueued = true;
+        Dispatcher.BeginInvoke(() =>
+        {
+            _refreshSourceQueued = false;
+            _vm.RefreshSourceState();
+        });
     }
 
     private void DispatchUi(Action action)

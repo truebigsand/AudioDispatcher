@@ -112,6 +112,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     Name = c.Name,
                     IsChecked = _settings.Targets.FirstOrDefault(t => t.DeviceId == c.Id)?.Enabled ?? false,
                 };
+                if (c.Present)
+                {
+                    // 行音量/静音 = 设备系统音量(仅新行读取一次;之后靠 500ms 轮询同步)
+                    var (vol, muted) = _engine.GetVolumeState(c.Id);
+                    row.Volume = vol * 100;
+                    row.IsMuted = muted;
+                }
                 _rows[c.Id] = row;
             }
             row.Format = c.Format;
@@ -119,13 +126,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
             row.Error = c.Present ? (_engine.GetError(c.Id) ?? "") : "设备已断开(插回后自动恢复)";
             row.Stats = "";
             row.Level = 0;
-            if (c.Present)
-            {
-                // 行音量/静音 = 设备系统音量(双向绑定)
-                var (vol, muted) = _engine.GetVolumeState(c.Id);
-                row.Volume = vol * 100;
-                row.IsMuted = muted;
-            }
             Devices.Add(row);
         }
         RefreshSourceState();

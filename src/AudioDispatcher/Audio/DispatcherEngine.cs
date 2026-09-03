@@ -29,6 +29,8 @@ public sealed class DispatcherEngine : IDisposable
     private readonly Dictionary<string, TargetOutput> _targetById = new();
     private List<RenderInfo> _candidates = new();
     private List<SourceInfo> _sourceCandidates = new();
+    private string _candidatesSig = "";
+    private string _sourceSig = "";
     // 音频线程(捕获回调/渲染)经此快照访问目标列表,避免与 UI 持锁(设备启停/枚举)互等
     private volatile TargetOutput[] _targetSnapshot = System.Array.Empty<TargetOutput>();
 
@@ -369,7 +371,7 @@ public sealed class DispatcherEngine : IDisposable
     {
         var n = _retryCount.GetValueOrDefault(deviceId) + 1;
         _retryCount[deviceId] = n;
-        var delaySec = Math.Min(2 * n, 30); // 2s 起,指数到 30s 封顶
+        var delaySec = Math.Min(2 * n, 10); // 2s 起,指数到 10s 封顶(熄屏恢复别等太久)
         _retryAfter[deviceId] = DateTime.UtcNow.AddSeconds(delaySec);
     }
 
@@ -548,7 +550,7 @@ public sealed class DispatcherEngine : IDisposable
         {
             var hadSource = _source != null;
             var hadCandidates = _sourceCandidates.Count > 0;
-            RefreshDeviceListsLocked();
+            var listChanged = RefreshDeviceListsLocked();
 
             // 源设备消失 → 停源
             if (hadSource && _source != null)
@@ -567,26 +569,23 @@ public sealed class DispatcherEngine : IDisposable
                 TryEnsureSourceLocked();
             }
 
-            // 目标消失 → 停;回来且配置启用 → 自动重启
+            // 目标消失 → 停(恢复统一交给 2s 巡检,避免通知风暴期间反复启停)
             foreach (var id in _targets.Select(t => t.DeviceId).ToArray())
             {
                 var c = _candidates.FirstOrDefault(x => x.Id == id);
                 if (c == null || !c.Present)
                 {
                     StopTargetLocked(id, "设备消失");
-                    TargetError?.Invoke(id, "设备已断开,分发已停止(插回后自动恢复)");
+                    TargetError?.Invoke(id, "设备已断开,自动恢复中…");
                 }
             }
-            if (_running)
-            {
-                StartAllTargetsLocked();
-            }
 
-            if (hadSource != (_source != null) || hadCandidates != (_sourceCandidates.Count > 0))
+            if (listChanged || hadSource != (_source != null) ||
+                hadCandidates != (_sourceCandidates.Count > 0))
             {
                 SourceCandidatesChanged?.Invoke();
+                EndpointsChanged?.Invoke();
             }
-            EndpointsChanged?.Invoke();
         }
     }
 
@@ -598,10 +597,17 @@ public sealed class DispatcherEngine : IDisposable
         }
     }
 
-    private void RefreshDeviceListsLocked()
+    /// <summary>刷新候选列表。返回 true = 设备清单(名称/格式/在线)实际变化,用于决定是否通知 UI 重建,抑制通知风暴下的无谓刷新。</summary>
+    private bool RefreshDeviceListsLocked()
     {
         _sourceCandidates = _devices.SourceCandidates();
         _candidates = _devices.RenderCandidates(_settings.BlockedDeviceNames);
+        var candidatesSig = string.Join('|', _candidates.Select(c => $"{c.Id}:{c.Name}:{c.Format}:{c.Present}"));
+        var sourcesSig = string.Join('|', _sourceCandidates.Select(c => $"{c.Id}:{c.Name}"));
+        var changed = candidatesSig != _candidatesSig || sourcesSig != _sourceSig;
+        _candidatesSig = candidatesSig;
+        _sourceSig = sourcesSig;
+        return changed;
     }
 
     private void OnTick()
