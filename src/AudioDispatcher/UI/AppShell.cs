@@ -71,10 +71,15 @@ public sealed class AppShell
 
     private void SetAllTargets(bool enabled)
     {
-        foreach (var c in _engine.Candidates.Where(c => c.Present))
+        // 启停涉及音频 COM,放后台线程(熄屏唤醒瞬间 Activate 可能挂起)
+        var ids = _engine.Candidates.Where(c => c.Present).Select(c => c.Id).ToList();
+        _ = System.Threading.Tasks.Task.Run(() =>
         {
-            _engine.SetTargetEnabled(c.Id, enabled);
-        }
+            foreach (var id in ids)
+            {
+                _engine.SetTargetEnabled(id, enabled);
+            }
+        });
         SettingsService.Save(_settings);
     }
 

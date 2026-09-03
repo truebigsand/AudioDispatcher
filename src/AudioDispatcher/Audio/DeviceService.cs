@@ -17,9 +17,14 @@ public sealed record RenderInfo(string Id, string Name, string Format, bool Pres
 /// </summary>
 public sealed class DeviceService : IDisposable
 {
-    private readonly MMDeviceEnumerator _enumerator = new();
+    // 注意:MMDeviceEnumerator 在创建线程(UI/STA)之外使用会不稳定(E_NOINTERFACE),
+    // 因此枚举/GetDevice 一律用线程内新建的局部实例;此长生命周期实例仅供通知注册。
+    private readonly MMDeviceEnumerator _notificationEnumerator = new();
     private readonly NotificationSink _sink = new();
     private readonly object _sync = new();
+    // NAudio 的 MMDeviceEnumerator 包装非线程安全:并发枚举/GetDevice/Dispose 会损坏
+    // RCW(症状:偶发 E_NOINTERFACE)。所有公开 COM 方法串行化。
+    private readonly object _comLock = new();
     private readonly Timer _throttle;
     private bool _pending;
 
@@ -28,17 +33,39 @@ public sealed class DeviceService : IDisposable
     public DeviceService()
     {
         _sink.Changed += OnSinkChanged;
-        _enumerator.RegisterEndpointNotificationCallback(_sink);
+        _notificationEnumerator.RegisterEndpointNotificationCallback(_sink);
         _throttle = new Timer(_ => RaiseChanged(), null, Timeout.Infinite, Timeout.Infinite);
     }
 
     /// <summary>VB-Audio 类虚拟声卡的捕获(Output)端点候选,即"源"候选。</summary>
     public List<SourceInfo> SourceCandidates()
     {
-        var result = new List<SourceInfo>();
-        var col = _enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active);
-        foreach (var d in col)
+        lock (_comLock)
         {
+            return SourceCandidatesCore();
+        }
+    }
+
+    private List<SourceInfo> SourceCandidatesCore()
+    {
+        var result = new List<SourceInfo>();
+        using var en = new MMDeviceEnumerator();
+        var col = en.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active);
+        using var e = col.GetEnumerator();
+        while (true)
+        {
+            try
+            {
+                if (!e.MoveNext())
+                {
+                    break;
+                }
+            }
+            catch (Exception)
+            {
+                break; // 枚举器级异常(设备剧变),放弃剩余
+            }
+            var d = e.Current;
             try
             {
                 var name = d.FriendlyName;
@@ -59,14 +86,18 @@ public sealed class DeviceService : IDisposable
     /// <summary>打开源捕获设备(调用方负责 Dispose)。</summary>
     public MMDevice? OpenSourceDevice(string deviceId)
     {
-        try
+        lock (_comLock)
         {
-            return _enumerator.GetDevice(deviceId);
-        }
-        catch (Exception ex)
-        {
-            AppLog.Warn($"打开源设备失败 {deviceId}: {ex.Message}");
-            return null;
+            try
+            {
+                using var en = new MMDeviceEnumerator();
+                return en.GetDevice(deviceId);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warn($"打开源设备失败 {deviceId}: {ex.Message}");
+                return null;
+            }
         }
     }
 
@@ -78,47 +109,87 @@ public sealed class DeviceService : IDisposable
     /// </summary>
     public List<RenderInfo> RenderCandidates(IReadOnlyCollection<string> blockedNames)
     {
-        var active = ActiveRenderIdsCore();
-
-        var result = new List<RenderInfo>();
-        var all = _enumerator.EnumerateAudioEndPoints(
-            DataFlow.Render, DeviceState.Active | DeviceState.Unplugged | DeviceState.NotPresent);
-        foreach (var d in all)
+        lock (_comLock)
         {
-            try
+            var active = ActiveRenderIdsCore();
+
+            var result = new List<RenderInfo>();
+            using var en = new MMDeviceEnumerator();
+            var all = en.EnumerateAudioEndPoints(
+                DataFlow.Render, DeviceState.Active | DeviceState.Unplugged | DeviceState.NotPresent);
+            using var e = all.GetEnumerator();
+            while (true)
             {
-                var name = d.FriendlyName;
-                if (IsVbVirtualRender(name) ||
-                    blockedNames.Any(b => name.Contains(b, StringComparison.OrdinalIgnoreCase)))
+                MMDevice d;
+                try
                 {
-                    continue;
+                    if (!e.MoveNext())
+                    {
+                        break;
+                    }
+                    d = e.Current;
                 }
-                var present = active.Contains(d.ID);
-                result.Add(new RenderInfo(d.ID, name, DescribeFormat(d), present));
+                catch (Exception)
+                {
+                    break; // 枚举器级异常(设备剧变),放弃剩余
+                }
+                try
+                {
+                    var name = d.FriendlyName;
+                    if (IsVbVirtualRender(name) ||
+                        blockedNames.Any(b => name.Contains(b, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        continue;
+                    }
+                    var present = active.Contains(d.ID);
+                    result.Add(new RenderInfo(d.ID, name, DescribeFormat(d), present));
+                }
+                catch (Exception)
+                {
+                    // 设备状态变化竞态,跳过该项
+                }
             }
-            catch (Exception)
-            {
-                // 设备状态变化竞态,跳过该项
-            }
+            return result;
         }
-        return result;
     }
 
     /// <summary>当前处于 Active 状态的渲染端点 ID 集合(看门狗巡检用,轻量,不含格式描述)。</summary>
-    public HashSet<string> GetActiveRenderIds() => ActiveRenderIdsCore();
+    public HashSet<string> GetActiveRenderIds()
+    {
+        lock (_comLock)
+        {
+            return ActiveRenderIdsCore();
+        }
+    }
 
     private HashSet<string> ActiveRenderIdsCore()
     {
         var active = new HashSet<string>();
-        foreach (var d in _enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+        using var en = new MMDeviceEnumerator();
+        var col = en.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
+        using var e = col.GetEnumerator();
+        while (true)
         {
+            MMDevice d;
+            try
+            {
+                if (!e.MoveNext())
+                {
+                    break;
+                }
+                d = e.Current;
+            }
+            catch (Exception)
+            {
+                break; // 枚举器级异常,放弃剩余
+            }
             try
             {
                 active.Add(d.ID);
             }
             catch (Exception)
             {
-                // 设备状态变化竞态(枚举瞬间被拔/插入),跳过该项
+                // 设备状态变化竞态,跳过该项
             }
         }
         return active;
@@ -127,14 +198,18 @@ public sealed class DeviceService : IDisposable
     /// <summary>打开目标渲染设备(调用方负责 Dispose)。</summary>
     public MMDevice? OpenRenderDevice(string deviceId)
     {
-        try
+        lock (_comLock)
         {
-            return _enumerator.GetDevice(deviceId);
-        }
-        catch (Exception ex)
-        {
-            AppLog.Warn($"打开目标设备失败 {deviceId}: {ex.Message}");
-            return null;
+            try
+            {
+                using var en = new MMDeviceEnumerator();
+                return en.GetDevice(deviceId);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warn($"打开目标设备失败 {deviceId}: {ex.Message}");
+                return null;
+            }
         }
     }
 
@@ -189,13 +264,13 @@ public sealed class DeviceService : IDisposable
         _throttle.Dispose();
         try
         {
-            _enumerator.UnregisterEndpointNotificationCallback(_sink);
+            _notificationEnumerator.UnregisterEndpointNotificationCallback(_sink);
         }
         catch
         {
             // 忽略注销失败
         }
-        _enumerator.Dispose();
+        _notificationEnumerator.Dispose();
     }
 
     private sealed class NotificationSink : IMMNotificationClient

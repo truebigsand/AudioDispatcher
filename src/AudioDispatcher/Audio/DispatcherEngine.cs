@@ -46,6 +46,12 @@ public sealed class DispatcherEngine : IDisposable
     private readonly Dictionary<string, DateTime> _retryAfter = new();
     private readonly Dictionary<string, int> _retryCount = new();
     private DateTime _lastVolumeWarnUtc = DateTime.MinValue;
+    // 设备列表后台刷新(锁内零 COM):通知只调度,枚举在独立线程执行,挂起可超时自愈
+    private volatile bool _refreshRunning;
+    private DateTime _refreshStartedUtc = DateTime.MinValue;
+    private DateTime _lastListRefreshUtc = DateTime.MinValue;
+    private int _refreshStuckCount;
+    private DateTime _refreshPausedUntilUtc = DateTime.MinValue;
 
     // ---- 事件(均在非音频线程触发,UI 自行 marshal) ----
     public event Action? EndpointsChanged;
@@ -148,7 +154,7 @@ public sealed class DispatcherEngine : IDisposable
     {
         lock (_lock)
         {
-            if (_source != null && _source.Device.ID == deviceId)
+            if (_source != null && _source.DeviceId == deviceId)
             {
                 return;
             }
@@ -208,20 +214,21 @@ public sealed class DispatcherEngine : IDisposable
         {
             _targetById.TryGetValue(deviceId, out t);
         }
-        try
+        if (t != null && t.TryGetEndpointVolume(out var vol))
         {
-            if (t != null)
+            try
             {
-                action(t.Device.AudioEndpointVolume);
+                action(vol);
+                return;
+            }
+            catch (Exception ex)
+            {
+                WarnVolumeThrottled($"运行目标 {deviceId} 端点音量操作失败: {ex.Message}");
                 return;
             }
         }
-        catch (Exception ex)
-        {
-            WarnVolumeThrottled($"读取运行目标 {deviceId} 端点音量失败: {ex.Message}");
-        }
 
-        // 目标未在分发:瞬时打开设备执行(滑块拖动高频,但 Activate 开销 ~0.1ms 级)
+        // 目标未在分发(或运行目标音量组件失效):瞬时打开设备执行(经 COM 串行锁)
         var dev = _devices.OpenRenderDevice(deviceId);
         if (dev == null)
         {
@@ -284,7 +291,8 @@ public sealed class DispatcherEngine : IDisposable
         {
             return true;
         }
-        var candidates = _devices.SourceCandidates();
+        // 用缓存候选(后台刷新填充),锁内不做 COM 枚举
+        var candidates = _sourceCandidates;
         var id = _settings.SourceDeviceId;
         if (string.IsNullOrEmpty(id) || !candidates.Any(c => c.Id == id))
         {
@@ -399,35 +407,24 @@ public sealed class DispatcherEngine : IDisposable
         }
     }
 
-    /// <summary>
-    /// 目标周期巡检(2s):运行中目标端点消失则停;配置启用、端点在线但未运行(启动失败/中断/熄屏恢复)的按退避重启。
-    /// 不依赖设备通知事件,覆盖通知缺失或恢复时机未就绪的场景。
-    /// </summary>
+    /// <summary>目标周期巡检(2s,锁内纯内存,基于缓存候选):运行中目标端点离线则停;
+    /// 配置启用、端点在线但未运行(启动失败/中断/熄屏恢复)的按退避重启。
+    /// 不依赖设备通知事件,覆盖通知缺失或恢复时机未就绪的场景。</summary>
     private void TargetMaintenanceLocked()
     {
         if (!_running || _source == null)
         {
             return;
         }
-        HashSet<string> active;
-        try
-        {
-            active = _devices.GetActiveRenderIds();
-        }
-        catch (Exception ex)
-        {
-            AppLog.Warn($"目标巡检枚举失败(下轮重试): {ex.Message}");
-            return;
-        }
         var now = DateTime.UtcNow;
+        var present = _candidates.Where(c => c.Present).Select(c => c.Id).ToHashSet();
 
         // 1) 端点已不在 Active → 停(引擎显示目标会话状态与设备实际一致)
         foreach (var t in _targets.ToArray())
         {
-            if (!active.Contains(t.DeviceId))
+            if (!present.Contains(t.DeviceId))
             {
                 StopTargetLocked(t.DeviceId, "端点离线(巡检)");
-                BackoffLocked(t.DeviceId);
                 TargetError?.Invoke(t.DeviceId, "设备已断开,自动恢复中…");
             }
         }
@@ -435,7 +432,7 @@ public sealed class DispatcherEngine : IDisposable
         // 2) 配置启用 + 端点在线 + 未运行 + 过了退避期 → 启动
         foreach (var cfg in _settings.Targets)
         {
-            if (!cfg.Enabled || _targetById.ContainsKey(cfg.DeviceId) || !active.Contains(cfg.DeviceId))
+            if (!cfg.Enabled || _targetById.ContainsKey(cfg.DeviceId) || !present.Contains(cfg.DeviceId))
             {
                 continue;
             }
@@ -544,70 +541,136 @@ public sealed class DispatcherEngine : IDisposable
         }
     }
 
-    private void OnDevicesChanged()
+    /// <summary>设备通知(任意 COM 线程):只做轻量调度,枚举在后台线程执行,避免锁内 COM 挂起拖垮引擎。</summary>
+    private void OnDevicesChanged() => ScheduleListRefresh(immediate: true);
+
+    /// <summary>调度一次后台设备枚举(单飞;运行中挂起超时后放弃并允许下轮重试)。</summary>
+    private void ScheduleListRefresh(bool immediate)
     {
         lock (_lock)
         {
-            var hadSource = _source != null;
-            var hadCandidates = _sourceCandidates.Count > 0;
-            var listChanged = RefreshDeviceListsLocked();
-
-            // 源设备消失 → 停源
-            if (hadSource && _source != null)
+            var now = DateTime.UtcNow;
+            if (now < _refreshPausedUntilUtc)
             {
-                var stillThere = _sourceCandidates.Any(c => c.Id == _source.Device.ID);
-                if (!stillThere)
+                return; // 连续挂起后的暂停期
+            }
+            if (_refreshRunning)
+            {
+                // 已在跑:若超过 8s 视为挂起,放弃等待(卡住的线程自生自灭),下轮重新调度
+                if ((now - _refreshStartedUtc).TotalSeconds > 8)
                 {
-                    var lostName = _source.DeviceName;
-                    StopSourceLocked("设备消失");
-                    SourceLost?.Invoke($"源设备 {lostName} 已断开");
+                    _refreshStuckCount++;
+                    AppLog.Warn($"设备列表刷新疑似挂起(第 {_refreshStuckCount} 次),放弃本轮");
+                    _refreshRunning = false;
+                    if (_refreshStuckCount >= 3)
+                    {
+                        _refreshPausedUntilUtc = now.AddSeconds(60);
+                        _refreshStuckCount = 0;
+                        AppLog.Warn("设备列表刷新连续挂起,暂停刷新 60s");
+                    }
+                }
+                else
+                {
+                    return;
                 }
             }
-            if (_source == null && hadCandidates && _sourceCandidates.Count > 0)
+            if (!immediate && (now - _lastListRefreshUtc).TotalSeconds < 5)
             {
-                // 源回来了:若正在运行则自动恢复
-                TryEnsureSourceLocked();
+                return; // 周期刷新节流(通知触发的 immediate 不受限)
             }
+            _refreshRunning = true;
+            _refreshStartedUtc = DateTime.UtcNow;
+            _lastListRefreshUtc = DateTime.UtcNow;
+            _ = Task.Run(RefreshListsInBackground);
+        }
+    }
 
-            // 目标消失 → 停(恢复统一交给 2s 巡检,避免通知风暴期间反复启停)
-            foreach (var id in _targets.Select(t => t.DeviceId).ToArray())
+    /// <summary>后台线程:枚举设备(COM,可能慢/挂起)→ 持锁应用结果与状态机。</summary>
+    private void RefreshListsInBackground()
+    {
+        try
+        {
+            var sourceCandidates = _devices.SourceCandidates();
+            var renderCandidates = _devices.RenderCandidates(_settings.BlockedDeviceNames);
+            lock (_lock)
             {
-                var c = _candidates.FirstOrDefault(x => x.Id == id);
-                if (c == null || !c.Present)
+                _refreshRunning = false;
+                _sourceCandidates = sourceCandidates;
+                _candidates = renderCandidates;
+                var candidatesSig = string.Join('|', _candidates.Select(c => $"{c.Id}:{c.Name}:{c.Format}:{c.Present}"));
+                var sourcesSig = string.Join('|', _sourceCandidates.Select(c => $"{c.Id}:{c.Name}"));
+                var changed = candidatesSig != _candidatesSig || sourcesSig != _sourceSig;
+                _candidatesSig = candidatesSig;
+                _sourceSig = sourcesSig;
+
+                SourceMaintenanceLocked();
+                StopOfflineTargetsLocked();
+
+                if (changed || _refreshStuckCount > 0)
                 {
-                    StopTargetLocked(id, "设备消失");
-                    TargetError?.Invoke(id, "设备已断开,自动恢复中…");
+                    _refreshStuckCount = 0;
+                    SourceCandidatesChanged?.Invoke();
+                    EndpointsChanged?.Invoke();
                 }
             }
-
-            if (listChanged || hadSource != (_source != null) ||
-                hadCandidates != (_sourceCandidates.Count > 0))
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"设备列表后台刷新失败(下轮重试): {ex}");
+            lock (_lock)
             {
-                SourceCandidatesChanged?.Invoke();
-                EndpointsChanged?.Invoke();
+                _refreshRunning = false;
+            }
+        }
+    }
+
+    /// <summary>源设备消失/恢复处理(基于缓存候选,调用方持锁)。</summary>
+    private void SourceMaintenanceLocked()
+    {
+        if (_source != null)
+        {
+            var stillThere = _sourceCandidates.Any(c => c.Id == _source.DeviceId);
+            if (!stillThere)
+            {
+                var lostName = _source.DeviceName;
+                StopSourceLocked("设备消失");
+                SourceLost?.Invoke($"源设备 {lostName} 已断开");
+            }
+        }
+        else if (_sourceCandidates.Count > 0 && _running)
+        {
+            TryEnsureSourceLocked();
+        }
+    }
+
+    /// <summary>缓存候选中的目标端点已离线 → 停路(恢复由巡检负责,调用方持锁)。</summary>
+    private void StopOfflineTargetsLocked()
+    {
+        foreach (var id in _targets.Select(t => t.DeviceId).ToArray())
+        {
+            var c = _candidates.FirstOrDefault(x => x.Id == id);
+            if (c == null || !c.Present)
+            {
+                StopTargetLocked(id, "设备消失");
+                TargetError?.Invoke(id, "设备已断开,自动恢复中…");
             }
         }
     }
 
     private void RefreshDeviceLists()
     {
-        lock (_lock)
+        // 启动时同步枚举一次(此时设备列表稳定,无风暴);此后全部走后台刷新
+        try
         {
-            RefreshDeviceListsLocked();
+            _sourceCandidates = _devices.SourceCandidates();
+            _candidates = _devices.RenderCandidates(_settings.BlockedDeviceNames);
+            _candidatesSig = string.Join('|', _candidates.Select(c => $"{c.Id}:{c.Name}:{c.Format}:{c.Present}"));
+            _sourceSig = string.Join('|', _sourceCandidates.Select(c => $"{c.Id}:{c.Name}"));
         }
-    }
-
-    /// <summary>刷新候选列表。返回 true = 设备清单(名称/格式/在线)实际变化,用于决定是否通知 UI 重建,抑制通知风暴下的无谓刷新。</summary>
-    private bool RefreshDeviceListsLocked()
-    {
-        _sourceCandidates = _devices.SourceCandidates();
-        _candidates = _devices.RenderCandidates(_settings.BlockedDeviceNames);
-        var candidatesSig = string.Join('|', _candidates.Select(c => $"{c.Id}:{c.Name}:{c.Format}:{c.Present}"));
-        var sourcesSig = string.Join('|', _sourceCandidates.Select(c => $"{c.Id}:{c.Name}"));
-        var changed = candidatesSig != _candidatesSig || sourcesSig != _sourceSig;
-        _candidatesSig = candidatesSig;
-        _sourceSig = sourcesSig;
-        return changed;
+        catch (Exception ex)
+        {
+            AppLog.Warn($"初始设备枚举失败: {ex.Message}");
+        }
     }
 
     private void OnTick()
@@ -620,14 +683,16 @@ public sealed class DispatcherEngine : IDisposable
                 {
                     return;
                 }
+                var now = DateTime.UtcNow;
+                // 周期保底:通知之外的候选刷新(熄屏恢复不依赖通知)
+                ScheduleListRefresh(immediate: false);
+
                 if (_source == null || !_source.IsRunning)
                 {
                     // 源失效:尝试重建(限频 10s)
                     TryRestartSourceLocked();
                     return;
                 }
-
-                var now = DateTime.UtcNow;
 
                 // 0) 目标周期巡检(熄屏/断线恢复不依赖通知事件)
                 if ((now - _lastTargetScanUtc).TotalSeconds >= 2)
@@ -694,7 +759,7 @@ public sealed class DispatcherEngine : IDisposable
         _lastRestartUtc = now;
         var had = _source != null;
         StopSourceLocked("重建");
-        RefreshDeviceListsLocked();
+        ScheduleListRefresh(immediate: true); // 刷新候选后由 SourceMaintenance 自动恢复源
         if (TryEnsureSourceLocked())
         {
             _silent = false;

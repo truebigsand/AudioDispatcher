@@ -112,13 +112,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     Name = c.Name,
                     IsChecked = _settings.Targets.FirstOrDefault(t => t.DeviceId == c.Id)?.Enabled ?? false,
                 };
-                if (c.Present)
-                {
-                    // 行音量/静音 = 设备系统音量(仅新行读取一次;之后靠 500ms 轮询同步)
-                    var (vol, muted) = _engine.GetVolumeState(c.Id);
-                    row.Volume = vol * 100;
-                    row.IsMuted = muted;
-                }
+                // 音量初值由后台音量同步补读,此处不碰 COM(UI 线程零音频调用)
                 _rows[c.Id] = row;
             }
             row.Format = c.Format;
@@ -129,28 +123,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Devices.Add(row);
         }
         RefreshSourceState();
-    }
-
-    /// <summary>周期同步设备系统音量到行 UI(用户在系统侧调节音量时滑块跟随)。</summary>
-    public void RefreshDeviceVolumes()
-    {
-        foreach (var row in Devices)
-        {
-            if (!row.IsPresent)
-            {
-                continue;
-            }
-            var (vol, muted) = _engine.GetVolumeState(row.Id);
-            var newVol = vol * 100;
-            if (Math.Abs(newVol - row.Volume) > 0.5)
-            {
-                row.Volume = newVol;
-            }
-            if (muted != row.IsMuted)
-            {
-                row.IsMuted = muted;
-            }
-        }
     }
 
     /// <summary>源状态(有无/采样率/静默)与引擎运行状态刷新。</summary>

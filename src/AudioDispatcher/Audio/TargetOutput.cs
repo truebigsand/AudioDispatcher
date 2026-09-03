@@ -21,6 +21,7 @@ public sealed class TargetOutput : IDisposable
     private readonly object _sync = new();
     private SampleRingBuffer _ring = null!;
     private WasapiOut? _out;
+    private NAudio.CoreAudioApi.AudioEndpointVolume? _endpointVolume;
 
     // 音量/静音由设备端点主音量控制(应用滑块绑定系统音量),渲染端不再做增益。
     // 以下字段由 UI 线程写、渲染线程读(volatile),或经 Interlocked 累计。
@@ -49,6 +50,23 @@ public sealed class TargetOutput : IDisposable
 
     /// <summary>渲染流非主动停止(设备会话中断/故障)时触发,由引擎决定重启。</summary>
     public event Action<Exception?>? PlaybackStopped;
+
+    /// <summary>懒创建并缓存端点音量控制(避免每 500ms Activate);失败时自愈:下次访问重建。</summary>
+    public bool TryGetEndpointVolume(out NAudio.CoreAudioApi.AudioEndpointVolume volume)
+    {
+        try
+        {
+            _endpointVolume ??= _device.AudioEndpointVolume;
+            volume = _endpointVolume;
+            return true;
+        }
+        catch (Exception)
+        {
+            _endpointVolume = null;
+            volume = null!;
+            return false;
+        }
+    }
 
     /// <summary>启动渲染流。失败抛出(设备被占用/失效),由引擎决定处置。</summary>
     public void Start(int bufferMs)

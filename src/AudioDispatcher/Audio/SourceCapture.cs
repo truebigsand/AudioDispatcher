@@ -30,14 +30,19 @@ public sealed class SourceCapture : IDisposable
     public SourceCapture(MMDevice device)
     {
         _device = device;
+        // 设备标识构造时缓存:熄屏/驱动重载后 MMDevice COM 引用会失效(RCW 断链),
+        // 运行期任何 COM 调用都会抛 E_NOINTERFACE(引擎巡检/维护会读到)。
+        DeviceId = device.ID;
+        DeviceName = device.FriendlyName;
         CaptureFormat = device.AudioClient.MixFormat;
     }
 
     public MMDevice Device => _device;
+    public string DeviceId { get; }
+    public string DeviceName { get; }
     public WaveFormat CaptureFormat { get; }
     public int SampleRate => CaptureFormat.SampleRate;
     public bool IsRunning => _running;
-    public string DeviceName => _device.FriendlyName;
 
     /// <summary>2ch float32 交织共享缓冲(每次回调覆盖)。订阅者须同步消费。</summary>
     public event Action<float[], int>? SamplesReady;
