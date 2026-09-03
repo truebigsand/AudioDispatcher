@@ -10,7 +10,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>AudioDispatcher</AssemblyName>
     <RootNamespace>AudioDispatcher</RootNamespace>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
     <StartupObject>AudioDispatcher.Program</StartupObject>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>

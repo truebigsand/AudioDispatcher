@@ -20,6 +20,7 @@ public sealed class AppShell
     private readonly AppSettings _settings;
     private readonly DeviceService _devices;
     private readonly DispatcherEngine _engine;
+    private readonly System.Windows.Threading.DispatcherTimer _trayStateTimer;
     private DateTime _lastBalloonUtc = DateTime.MinValue;
 
     public AppShell()
@@ -35,8 +36,18 @@ public sealed class AppShell
         _tray.EnableAllRequested += () => DispatchUi(() => SetAllTargets(true));
         _tray.DisableAllRequested += () => DispatchUi(() => SetAllTargets(false));
         _tray.PauseToggleRequested += OnPauseToggle;
+        _tray.OpenLogsRequested += OnOpenLogsRequested;
         _tray.AutoStartChanged += OnAutoStartChanged;
         _tray.ExitRequested += OnExitRequested;
+
+        // 托盘文本轮询:目标设备数是异步增长的(RunningChanged 只在启停时触发),
+        // 每 1s 同步一次,保证 hover 显示"分发中(N 设备)"准确
+        _trayStateTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1),
+        };
+        _trayStateTimer.Tick += (_, _) => UpdateTrayState();
+        _trayStateTimer.Start();
 
         _engine.RunningChanged += () => DispatchUi(UpdateTrayState);
         _engine.TargetError += (id, msg) => DispatchUi(() => OnTargetError(msg));
@@ -60,6 +71,19 @@ public sealed class AppShell
     }
 
     public void ShowMainWindow() => _window.ActivateFromTray();
+
+    private void OnOpenLogsRequested()
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                "explorer.exe", Logging.AppLog.LogDirectory) { UseShellExecute = false });
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error(ex, "打开日志目录失败");
+        }
+    }
 
     private void UpdateTrayState()
     {
@@ -137,6 +161,7 @@ public sealed class AppShell
             return;
         }
         AppLog.Info("用户退出应用");
+        _trayStateTimer.Stop();
         _window.AllowClose = true;
         _window.Close(); // Closing 内保存窗口位置与设置
 

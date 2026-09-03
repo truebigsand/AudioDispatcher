@@ -26,6 +26,7 @@ public sealed class TrayIcon : IDisposable
     public event Action? EnableAllRequested;
     public event Action? DisableAllRequested;
     public event Action? PauseToggleRequested;
+    public event Action? OpenLogsRequested;
     public event Action<bool>? AutoStartChanged;
     public event Action? ExitRequested;
 
@@ -50,6 +51,12 @@ public sealed class TrayIcon : IDisposable
         _pauseItem = new ToolStripMenuItem("暂停分发");
         _pauseItem.Click += (_, _) => PauseToggleRequested?.Invoke();
         menu.Items.Add(_pauseItem);
+
+        menu.Items.Add(new ToolStripSeparator());
+
+        var openLogs = new ToolStripMenuItem("打开日志文件夹");
+        openLogs.Click += (_, _) => OpenLogsRequested?.Invoke();
+        menu.Items.Add(openLogs);
 
         menu.Items.Add(new ToolStripSeparator());
 

@@ -30,6 +30,8 @@ public static class AppLog
         }
     }
 
+    public static string LogDirectory => Dir;
+
     public static void Info(string message) => Write("INF", message, null);
 
     public static void Warn(string message) => Write("WRN", message, null);
