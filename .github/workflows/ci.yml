@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Release 构建(WPF)
+        run: dotnet build src/AudioDispatcher/AudioDispatcher.csproj -c Release --nologo
+
+      - name: 图标生成器可复现性检查
+        run: dotnet build scripts/icon-gen/icon-gen.csproj -c Release --nologo
+
+      - name: 发布框架依赖产物(win-x64)
+        run: dotnet publish src/AudioDispatcher/AudioDispatcher.csproj -c Release -r win-x64 --self-contained false -o publish/fd --nologo
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioDispatcher-framework-dependent
+          path: publish/fd
+          if-no-files-found: error
