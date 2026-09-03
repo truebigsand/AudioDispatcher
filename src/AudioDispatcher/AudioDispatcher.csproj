@@ -12,7 +12,6 @@
     <RootNamespace>AudioDispatcher</RootNamespace>
     <Version>0.1.0</Version>
     <StartupObject>AudioDispatcher.Program</StartupObject>
-    <InvariantGlobalization>true</InvariantGlobalization>
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
   </PropertyGroup>
 

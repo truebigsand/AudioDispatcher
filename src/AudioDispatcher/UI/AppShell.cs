@@ -1,19 +1,26 @@
 using System;
-using System.Windows;
+using System.Linq;
+using System.Windows.Forms;
+using AudioDispatcher.Audio;
+using AudioDispatcher.Logging;
 using AudioDispatcher.Settings;
 using Microsoft.Win32;
+using Application = System.Windows.Application;
+using MessageBox = System.Windows.Forms.MessageBox;
 
 namespace AudioDispatcher.UI;
 
 /// <summary>
-/// 应用壳层:装配托盘、主窗口、设置加载与保存、开机自启注册表项。
-/// 引擎(DispatcherEngine)接入点在音频核心落地后于此处接线。
+/// 应用壳层:装配设备服务/分发引擎/托盘/主窗口,处理托盘菜单动作与退出流程。
 /// </summary>
 public sealed class AppShell
 {
     private readonly MainWindow _window;
     private readonly TrayIcon _tray;
     private readonly AppSettings _settings;
+    private readonly DeviceService _devices;
+    private readonly DispatcherEngine _engine;
+    private DateTime _lastBalloonUtc = DateTime.MinValue;
     private bool _exiting;
 
     public AppShell()
@@ -21,18 +28,94 @@ public sealed class AppShell
         _settings = SettingsService.Load();
         ApplyStartWithWindows(_settings.StartWithWindows);
 
+        _devices = new DeviceService();
+        _engine = new DispatcherEngine(_devices, _settings);
+
         _tray = new TrayIcon();
         _tray.ShowMainRequested += ShowMainWindow;
-        _tray.EnableAllRequested += () => { };
-        _tray.DisableAllRequested += () => { };
-        _tray.PauseToggleRequested += () => { };
+        _tray.EnableAllRequested += () => DispatchUi(() => SetAllTargets(true));
+        _tray.DisableAllRequested += () => DispatchUi(() => SetAllTargets(false));
+        _tray.PauseToggleRequested += OnPauseToggle;
         _tray.AutoStartChanged += OnAutoStartChanged;
         _tray.ExitRequested += OnExitRequested;
 
-        _window = new MainWindow();
-        Application.Current.MainWindow = _window;
-        _window.Closing += OnWindowClosing;
+        _engine.RunningChanged += () => DispatchUi(UpdateTrayState);
+        _engine.TargetError += (id, msg) => DispatchUi(() => OnTargetError(msg));
+        _engine.SourceLost += msg => DispatchUi(() => OnSourceLost(msg));
 
+        _window = new MainWindow(_engine, _settings);
+        Application.Current.MainWindow = _window;
+        ApplyWindowBounds();
+        _window.Show();
+
+        UpdateTrayState();
+        if (_settings.EngineAutoStart)
+        {
+            _window.Dispatcher.BeginInvoke(() =>
+            {
+                if (!_engine.SetRunning(true))
+                {
+                    AppLog.Warn("开机自启分发失败(源不可用)");
+                }
+            });
+        }
+    }
+
+    public void ShowMainWindow() => _window.ActivateFromTray();
+
+    private void UpdateTrayState()
+    {
+        _tray.IsPaused = !_engine.Running;
+        _tray.SetStatusText(_engine.Running
+            ? $"AudioDispatcher — 分发中({_engine.ActiveTargets.Count} 设备)"
+            : "AudioDispatcher — 已暂停");
+    }
+
+    private void SetAllTargets(bool enabled)
+    {
+        foreach (var c in _engine.Candidates.Where(c => c.Present))
+        {
+            _engine.SetTargetEnabled(c.Id, enabled);
+        }
+        SettingsService.Save(_settings);
+    }
+
+    private void OnPauseToggle()
+    {
+        var next = !_engine.Running;
+        AppLog.Info($"托盘操作:{(next ? "暂停分发" : "恢复分发")}");
+        _engine.SetRunning(next);
+        UpdateTrayState();
+    }
+
+    private void OnTargetError(string message)
+    {
+        BalloonThrottled("设备异常", message, ToolTipIcon.Warning);
+    }
+
+    private void OnSourceLost(string message)
+    {
+        _window.RefreshFromShell();
+        BalloonThrottled("音频源丢失", message, ToolTipIcon.Error);
+    }
+
+    private void BalloonThrottled(string title, string message, ToolTipIcon icon)
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastBalloonUtc < TimeSpan.FromSeconds(8))
+        {
+            return;
+        }
+        _lastBalloonUtc = now;
+        _tray.Balloon(title, message, icon);
+    }
+
+    private void DispatchUi(Action action) => _window.Dispatcher.BeginInvoke(action);
+
+    // ────────────── 窗口与退出 ──────────────
+
+    private void ApplyWindowBounds()
+    {
         if (_settings.WindowLeft is double left && _settings.WindowTop is double top)
         {
             _window.Left = left;
@@ -40,33 +123,25 @@ public sealed class AppShell
         }
         _window.Width = _settings.WindowWidth;
         _window.Height = _settings.WindowHeight;
-        _window.Show();
     }
 
-    public void ShowMainWindow() => _window.ActivateFromTray();
-
-    private void OnWindowClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    private void OnExitRequested()
     {
-        if (_exiting || !_settings.MinimizeToTray)
+        var msg = "确定退出 AudioDispatcher 吗?\n\n提示:若系统默认输出仍指向 CABLE Input,退出后将没有声音,请先切回原设备。";
+        if (MessageBox.Show(msg, "退出 AudioDispatcher", MessageBoxButtons.OKCancel,
+                            MessageBoxIcon.Question) != DialogResult.OK)
         {
-            SaveWindowBounds();
             return;
         }
-        // 关闭 = 最小化到托盘
-        e.Cancel = true;
-        _window.Hide();
-    }
+        _exiting = true;
+        AppLog.Info("用户退出应用");
+        _window.AllowClose = true;
+        _window.Close(); // Closing 内保存窗口位置与设置
 
-    private void SaveWindowBounds()
-    {
-        if (_window.WindowState == WindowState.Normal)
-        {
-            _settings.WindowLeft = _window.Left;
-            _settings.WindowTop = _window.Top;
-        }
-        _settings.WindowWidth = _window.Width;
-        _settings.WindowHeight = _window.Height;
-        SettingsService.Save(_settings);
+        _engine.Dispose();
+        _devices.Dispose();
+        _tray.Dispose();
+        Application.Current.Shutdown();
     }
 
     private void OnAutoStartChanged(bool enabled)
@@ -96,23 +171,9 @@ public sealed class AppShell
                 key.DeleteValue("AudioDispatcher", throwOnMissingValue: false);
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // 注册表写入失败不阻断使用。
+            AppLog.Error(ex, "写入开机自启注册表失败");
         }
-    }
-
-    private void OnExitRequested()
-    {
-        if (MessageBox.Show("确定退出 AudioDispatcher 吗?\n\n提示:若系统默认输出仍指向 CABLE Input,退出后将没有声音,请先切回原设备。",
-                            "退出 AudioDispatcher",
-                            MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
-        {
-            return;
-        }
-        _exiting = true;
-        SaveWindowBounds();
-        _tray.Dispose();
-        Application.Current.Shutdown();
     }
 }

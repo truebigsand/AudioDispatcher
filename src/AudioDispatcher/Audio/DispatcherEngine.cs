@@ -42,6 +42,7 @@ public sealed class DispatcherEngine : IDisposable
     public event Action? SourceCandidatesChanged;
     public event Action<string, string>? TargetError;
     public event Action<string>? SourceLost;
+    public event Action? RunningChanged;
 
     public DispatcherEngine(DeviceService devices, AppSettings settings)
     {
@@ -103,23 +104,32 @@ public sealed class DispatcherEngine : IDisposable
             if (!on)
             {
                 StopAllLocked("手动停止");
-                _running = false;
+                SetRunningField(false);
                 return true;
             }
 
             // 启动
             if (_source == null && !TryEnsureSourceLocked())
             {
-                _running = false;
+                SetRunningField(false);
                 SourceLost?.Invoke("未找到 VB-Audio Cable 捕获端点,请先安装并连接虚拟声卡");
                 return false;
             }
             StartAllTargetsLocked();
-            _running = true;
+            SetRunningField(true);
             _lastDataUtc = DateTime.UtcNow;
             _silent = false;
             AppLog.Info($"分发启动: {_targets.Count} 个目标设备, 缓冲 {_bufferMs}ms");
             return true;
+        }
+    }
+
+    private void SetRunningField(bool value)
+    {
+        if (_running != value)
+        {
+            _running = value;
+            RunningChanged?.Invoke();
         }
     }
 
@@ -133,7 +143,7 @@ public sealed class DispatcherEngine : IDisposable
             }
             _settings.SourceDeviceId = deviceId;
             StopSourceLocked("切换源");
-            _running = false; // 目标流先停,等待重新启动
+            SetRunningField(false); // 目标流先停,等待重新启动
             StopAllTargetsLocked();
             EndpointsChanged?.Invoke();
         }
