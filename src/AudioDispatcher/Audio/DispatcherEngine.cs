@@ -55,6 +55,11 @@ public sealed class DispatcherEngine : IDisposable
     // 若发生在锁内会拖死整个引擎与 UI;一律排队到此串行队列执行。
     private readonly object _execLock = new();
     private Task _execTail = Task.CompletedTask;
+    // 系统主音量(默认端点=CABLE Input 的端点音量,VB-Cable 驱动直通不衰减,
+    // 由分发器以软件增益实现"任务栏音量真正控制最终响度")
+    private readonly MasterVolumeMonitor _masterMonitor = new();
+    private volatile float _masterVol = 1f;
+    private volatile bool _masterMuted;
 
     private void EnqueueAudioOp(Action op)
     {
@@ -95,6 +100,7 @@ public sealed class DispatcherEngine : IDisposable
         _settings = settings;
         _bufferMs = settings.BufferMs;
         _devices.Changed += OnDevicesChanged;
+        _masterMonitor.Changed += OnMasterVolumeChanged;
         _watchdog = new Timer(_ => OnTick(), null, 300, 500);
         RefreshDeviceLists();
     }
@@ -465,6 +471,7 @@ public sealed class DispatcherEngine : IDisposable
                 _targets.Add(target);
                 _targetById[deviceId] = target;
                 _targetSnapshot = _targets.ToArray(); // 持锁刷新音频线程快照
+                target.MasterGain = _masterMuted || _masterVol <= 0f ? 0f : _masterVol;
                 _startingIds.Remove(deviceId);
                 ClearBackoffLocked(deviceId);
                 _errors.Remove(deviceId);
@@ -540,6 +547,18 @@ public sealed class DispatcherEngine : IDisposable
         catch (Exception callbackEx)
         {
             AppLog.Error(callbackEx, "播放中断回调处理异常");
+        }
+    }
+
+    /// <summary>主音量变化(COM 通知线程):写 volatile 并应用到全部运行目标。</summary>
+    private void OnMasterVolumeChanged(float volume, bool muted)
+    {
+        _masterVol = volume;
+        _masterMuted = muted;
+        var gain = muted || volume <= 0f ? 0f : volume;
+        foreach (var t in _targetSnapshot)
+        {
+            t.MasterGain = gain;
         }
     }
 
@@ -724,6 +743,14 @@ public sealed class DispatcherEngine : IDisposable
         {
             var sourceCandidates = _devices.SourceCandidates();
             var renderCandidates = _devices.RenderCandidates(_settings.BlockedDeviceNames);
+            try
+            {
+                _masterMonitor.Refresh(); // 跟随默认端点变化(COM,后台线程)
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warn($"主音量监视器刷新失败: {ex.Message}");
+            }
             lock (_lock)
             {
                 _refreshRunning = false;
@@ -958,6 +985,8 @@ public sealed class DispatcherEngine : IDisposable
     {
         _watchdog.Dispose();
         _devices.Changed -= OnDevicesChanged;
+        _masterMonitor.Changed -= OnMasterVolumeChanged;
+        _masterMonitor.Dispose();
         List<IDisposable> toDispose;
         lock (_lock)
         {

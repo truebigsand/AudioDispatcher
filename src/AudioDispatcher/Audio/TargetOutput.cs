@@ -24,6 +24,9 @@ public sealed class TargetOutput : IDisposable
     private NAudio.CoreAudioApi.AudioEndpointVolume? _endpointVolume;
 
     // 音量/静音由设备端点主音量控制(应用滑块绑定系统音量),渲染端不再做增益。
+    // MasterGain 例外:系统主音量(CABLE Input 端点音量,驱动直通无效)由分发器
+    // 以软件增益实现,作用于全部目标(任务栏音量条/静音键由此真正生效)。
+    internal volatile float MasterGain = 1f;
     // 以下字段由 UI 线程写、渲染线程读(volatile),或经 Interlocked 累计。
     internal volatile bool SilentMode;
     internal volatile bool CapturePaused;
@@ -278,11 +281,24 @@ public sealed class TargetOutput : IDisposable
                 Interlocked.Add(ref _owner.UnderrunFrames, frames - got);
             }
 
-            // 电平(音量在设备端点控制,此处仅测量)
+            // 系统主音量软件增益 + 电平(设备端点音量在硬件层,此处仅主增益)
+            var master = _owner.MasterGain;
             var sum = 0.0;
-            for (var s = offset; s < offset + frames * 2; s++)
+            if (master != 1f)
             {
-                sum += buffer[s] * buffer[s];
+                for (var s = offset; s < offset + frames * 2; s++)
+                {
+                    var v = buffer[s] * master;
+                    buffer[s] = v;
+                    sum += v * v;
+                }
+            }
+            else
+            {
+                for (var s = offset; s < offset + frames * 2; s++)
+                {
+                    sum += buffer[s] * buffer[s];
+                }
             }
             _owner.LevelRms = (float)Math.Sqrt(sum / Math.Max(1, frames * 2));
             return count;
