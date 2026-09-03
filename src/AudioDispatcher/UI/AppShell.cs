@@ -21,7 +21,6 @@ public sealed class AppShell
     private readonly DeviceService _devices;
     private readonly DispatcherEngine _engine;
     private DateTime _lastBalloonUtc = DateTime.MinValue;
-    private bool _exiting;
 
     public AppShell()
     {
@@ -132,7 +131,6 @@ public sealed class AppShell
         {
             return;
         }
-        _exiting = true;
         AppLog.Info("用户退出应用");
         _window.AllowClose = true;
         _window.Close(); // Closing 内保存窗口位置与设置
