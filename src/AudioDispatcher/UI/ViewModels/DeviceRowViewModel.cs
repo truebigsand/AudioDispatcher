@@ -35,6 +35,7 @@ public sealed class DeviceRowViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>设备系统音量百分比(0–100),双向绑定设备端点主音量。</summary>
     public double Volume
     {
         get => _volume;

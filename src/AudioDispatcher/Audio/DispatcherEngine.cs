@@ -171,25 +171,66 @@ public sealed class DispatcherEngine : IDisposable
         }
     }
 
+    /// <summary>设置目标设备的系统音量(端点主音量,0..1)。分发未启用该设备时即时打开/释放。</summary>
     public void SetVolume(string deviceId, double volume)
     {
-        var cfg = GetOrAddConfig(deviceId);
-        cfg.Volume = Math.Clamp(volume, 0, 1.5);
-        var t = GetTarget(deviceId);
-        if (t != null)
-        {
-            t.Gain = (float)cfg.Volume;
-        }
+        WithEndpointVolume(deviceId, v =>
+            v.MasterVolumeLevelScalar = (float)Math.Clamp(volume, 0, 1));
     }
 
     public void SetMuted(string deviceId, bool muted)
     {
-        var cfg = GetOrAddConfig(deviceId);
-        cfg.Muted = muted;
-        var t = GetTarget(deviceId);
-        if (t != null)
+        WithEndpointVolume(deviceId, v => v.Mute = muted);
+    }
+
+    /// <summary>读取目标设备当前系统音量与静音状态。</summary>
+    public (double Volume, bool Muted) GetVolumeState(string deviceId)
+    {
+        var result = (Volume: 1.0, Muted: false);
+        WithEndpointVolume(deviceId, v =>
         {
-            t.Muted = muted;
+            result = (v.MasterVolumeLevelScalar, v.Mute);
+        });
+        return result;
+    }
+
+    private void WithEndpointVolume(string deviceId, Action<NAudio.CoreAudioApi.AudioEndpointVolume> action)
+    {
+        TargetOutput? t = null;
+        lock (_lock)
+        {
+            _targetById.TryGetValue(deviceId, out t);
+        }
+        try
+        {
+            if (t != null)
+            {
+                action(t.Device.AudioEndpointVolume);
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"读取运行目标 {deviceId} 端点音量失败: {ex.Message}");
+        }
+
+        // 目标未在分发:瞬时打开设备执行(滑块拖动高频,但 Activate 开销 ~0.1ms 级)
+        var dev = _devices.OpenRenderDevice(deviceId);
+        if (dev == null)
+        {
+            return;
+        }
+        try
+        {
+            action(dev.AudioEndpointVolume);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"设置设备 {deviceId} 端点音量失败: {ex.Message}");
+        }
+        finally
+        {
+            dev.Dispose();
         }
     }
 
@@ -284,8 +325,6 @@ public sealed class DispatcherEngine : IDisposable
         try
         {
             var target = new TargetOutput(device, _source!.SampleRate);
-            target.Gain = (float)GetOrAddConfig(deviceId).Volume;
-            target.Muted = GetOrAddConfig(deviceId).Muted;
             target.Start(_bufferMs);
             _targets.Add(target);
             _targetById[deviceId] = target;

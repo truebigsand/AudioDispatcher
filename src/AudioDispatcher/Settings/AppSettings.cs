@@ -11,9 +11,6 @@ public sealed class AppSettings
     /// <summary>每设备环形缓冲大小(毫秒),10–500。</summary>
     public int BufferMs { get; set; } = 50;
 
-    /// <summary>启动应用后自动开始分发(需已检测到源)。</summary>
-    public bool EngineAutoStart { get; set; }
-
     /// <summary>开机自启(注册表 Run 键)。</summary>
     public bool StartWithWindows { get; set; }
 

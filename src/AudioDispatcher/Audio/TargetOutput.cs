@@ -20,9 +20,8 @@ public sealed class TargetOutput : IDisposable
     private SampleRingBuffer _ring = null!;
     private WasapiOut? _out;
 
+    // 音量/静音由设备端点主音量控制(应用滑块绑定系统音量),渲染端不再做增益。
     // 以下字段由 UI 线程写、渲染线程读(volatile),或经 Interlocked 累计。
-    internal volatile float Gain = 1f;
-    internal volatile bool Muted;
     internal volatile bool SilentMode;
     internal volatile bool CapturePaused;
     internal long OverrunFrames;
@@ -244,15 +243,7 @@ public sealed class TargetOutput : IDisposable
                 Interlocked.Add(ref _owner.UnderrunFrames, frames - got);
             }
 
-            // 增益 + 电平
-            var gain = _owner.Muted ? 0f : _owner.Gain;
-            if (gain != 1f)
-            {
-                for (var s = offset; s < offset + frames * 2; s++)
-                {
-                    buffer[s] *= gain;
-                }
-            }
+            // 电平(音量在设备端点控制,此处仅测量)
             var sum = 0.0;
             for (var s = offset; s < offset + frames * 2; s++)
             {

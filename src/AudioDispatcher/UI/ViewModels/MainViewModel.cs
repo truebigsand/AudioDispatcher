@@ -103,14 +103,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (!_rows.TryGetValue(c.Id, out var row))
             {
-                var cfg = _settings.Targets.FirstOrDefault(t => t.DeviceId == c.Id);
                 row = new DeviceRowViewModel
                 {
                     Id = c.Id,
                     Name = c.Name,
-                    IsChecked = cfg?.Enabled ?? false,
-                    Volume = (cfg?.Volume ?? 1.0) * 100,
-                    IsMuted = cfg?.Muted ?? false,
+                    IsChecked = _settings.Targets.FirstOrDefault(t => t.DeviceId == c.Id)?.Enabled ?? false,
                 };
                 _rows[c.Id] = row;
             }
@@ -119,9 +116,38 @@ public sealed class MainViewModel : INotifyPropertyChanged
             row.Error = c.Present ? (_engine.GetError(c.Id) ?? "") : "设备已断开(插回后自动恢复)";
             row.Stats = "";
             row.Level = 0;
+            if (c.Present)
+            {
+                // 行音量/静音 = 设备系统音量(双向绑定)
+                var (vol, muted) = _engine.GetVolumeState(c.Id);
+                row.Volume = vol * 100;
+                row.IsMuted = muted;
+            }
             Devices.Add(row);
         }
         RefreshSourceState();
+    }
+
+    /// <summary>周期同步设备系统音量到行 UI(用户在系统侧调节音量时滑块跟随)。</summary>
+    public void RefreshDeviceVolumes()
+    {
+        foreach (var row in Devices)
+        {
+            if (!row.IsPresent)
+            {
+                continue;
+            }
+            var (vol, muted) = _engine.GetVolumeState(row.Id);
+            var newVol = vol * 100;
+            if (Math.Abs(newVol - row.Volume) > 0.5)
+            {
+                row.Volume = newVol;
+            }
+            if (muted != row.IsMuted)
+            {
+                row.IsMuted = muted;
+            }
+        }
     }
 
     /// <summary>源状态(有无/采样率/静默)与引擎运行状态刷新。</summary>

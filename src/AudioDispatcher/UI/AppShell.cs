@@ -49,16 +49,15 @@ public sealed class AppShell
         _window.Show();
 
         UpdateTrayState();
-        if (_settings.EngineAutoStart)
+        // 打开应用即自动开始分发(无源时引擎返回 false,UI 引导横幅会提示)
+        _window.Dispatcher.BeginInvoke(() =>
         {
-            _window.Dispatcher.BeginInvoke(() =>
+            if (_engine.SetRunning(true))
             {
-                if (!_engine.SetRunning(true))
-                {
-                    AppLog.Warn("开机自启分发失败(源不可用)");
-                }
-            });
-        }
+                AppLog.Info("启动自动开始分发");
+            }
+            UpdateTrayState();
+        });
     }
 
     public void ShowMainWindow() => _window.ActivateFromTray();

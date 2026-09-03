@@ -41,7 +41,11 @@ public partial class MainWindow : Window
         _realtimeTimer.Start();
 
         _slowTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
-        _slowTimer.Tick += (_, _) => _vm.RefreshSourceState();
+        _slowTimer.Tick += (_, _) =>
+        {
+            _vm.RefreshSourceState();
+            _vm.RefreshDeviceVolumes();
+        };
         _slowTimer.Start();
 
         _saveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };

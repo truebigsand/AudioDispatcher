@@ -141,11 +141,11 @@
                                         </StackPanel>
 
                                         <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                                            <Slider Minimum="0" Maximum="150" Width="110"
+                                            <Slider Minimum="0" Maximum="100" Width="110"
                                                     Value="{Binding Volume, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                                     IsEnabled="{Binding RowEnabled}"
                                                     ValueChanged="OnRowVolumeChanged"
-                                                    ToolTip="音量 0-150%"/>
+                                                    ToolTip="该设备的系统音量(0-100%)"/>
                                             <TextBlock Text="{Binding Volume, StringFormat={}{0:0}%}" FontSize="10"
                                                        Foreground="#777" Margin="4,0,0,0" Width="34"
                                                        VerticalAlignment="Center"/>
