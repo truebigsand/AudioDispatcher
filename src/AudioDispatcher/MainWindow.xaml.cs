@@ -49,6 +49,7 @@ public partial class MainWindow : Window
         _slowTimer.Tick += (_, _) =>
         {
             _vm.RefreshSourceState();
+            _vm.RefreshRowErrors();
             SyncVolumesInBackground();
         };
         _slowTimer.Start();

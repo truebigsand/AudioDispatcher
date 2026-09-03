@@ -31,6 +31,7 @@ public sealed class DispatcherEngine : IDisposable
     private List<SourceInfo> _sourceCandidates = new();
     private string _candidatesSig = "";
     private string _sourceSig = "";
+    private HashSet<string> _lastPresentIds = new(); // 上次刷新时在线端点(检测"恢复"转换)
     // 音频线程(捕获回调/渲染)经此快照访问目标列表,避免与 UI 持锁(设备启停/枚举)互等
     private volatile TargetOutput[] _targetSnapshot = System.Array.Empty<TargetOutput>();
 
@@ -736,6 +737,25 @@ public sealed class DispatcherEngine : IDisposable
 
                 SourceMaintenanceLocked();
                 StopOfflineTargetsLocked();
+                // 端点从离线恢复在线:清除该设备的退避并立即重试一次(唤醒后不用等退避到期)
+                var nowPresent = _candidates.Where(c => c.Present).Select(c => c.Id).ToHashSet();
+                if (_lastPresentIds.Count > 0)
+                {
+                    foreach (var id in nowPresent)
+                    {
+                        if (_lastPresentIds.Contains(id))
+                        {
+                            continue;
+                        }
+                        var cfg = _settings.Targets.FirstOrDefault(t => t.DeviceId == id);
+                        if (cfg is { Enabled: true } && !_targetById.ContainsKey(id))
+                        {
+                            ClearBackoffLocked(id);
+                            TryStartTargetLocked(id);
+                        }
+                    }
+                }
+                _lastPresentIds = nowPresent;
 
                 if (changed || _refreshStuckCount > 0)
                 {

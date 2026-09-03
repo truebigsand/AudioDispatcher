@@ -125,6 +125,24 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RefreshSourceState();
     }
 
+    /// <summary>周期同步行错误文本:引擎成功重连(错误清除)后 UI 自动消除错误码,
+    /// 不依赖设备清单变化事件。</summary>
+    public void RefreshRowErrors()
+    {
+        foreach (var row in Devices)
+        {
+            if (!row.IsPresent)
+            {
+                continue;
+            }
+            var err = _engine.GetError(row.Id) ?? "";
+            if (row.Error != err)
+            {
+                row.Error = err;
+            }
+        }
+    }
+
     /// <summary>源状态(有无/采样率/静默)与引擎运行状态刷新。</summary>
     public void RefreshSourceState()
     {
