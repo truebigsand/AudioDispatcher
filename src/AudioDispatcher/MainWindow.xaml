@@ -1,0 +1,10 @@
+<Window x:Class="AudioDispatcher.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="AudioDispatcher" Width="720" Height="560"
+        WindowStartupLocation="CenterScreen">
+    <Grid>
+        <TextBlock Text="AudioDispatcher" HorizontalAlignment="Center" VerticalAlignment="Center"
+                   FontSize="28" Foreground="#808080" />
+    </Grid>
+</Window>
