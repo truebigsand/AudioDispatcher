@@ -39,11 +39,18 @@ public sealed class DeviceService : IDisposable
         var col = _enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active);
         foreach (var d in col)
         {
-            var name = d.FriendlyName;
-            if (name.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase) ||
-                name.Contains("CABLE", StringComparison.OrdinalIgnoreCase))
+            try
             {
-                result.Add(new SourceInfo(d.ID, name));
+                var name = d.FriendlyName;
+                if (name.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("CABLE", StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Add(new SourceInfo(d.ID, name));
+                }
+            }
+            catch (Exception)
+            {
+                // 设备状态变化竞态,跳过该项
             }
         }
         return result;
@@ -71,27 +78,50 @@ public sealed class DeviceService : IDisposable
     /// </summary>
     public List<RenderInfo> RenderCandidates(IReadOnlyCollection<string> blockedNames)
     {
-        var active = new HashSet<string>();
-        foreach (var d in _enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
-        {
-            active.Add(d.ID);
-        }
+        var active = ActiveRenderIdsCore();
 
         var result = new List<RenderInfo>();
         var all = _enumerator.EnumerateAudioEndPoints(
             DataFlow.Render, DeviceState.Active | DeviceState.Unplugged | DeviceState.NotPresent);
         foreach (var d in all)
         {
-            var name = d.FriendlyName;
-            if (IsVbVirtualRender(name) ||
-                blockedNames.Any(b => name.Contains(b, StringComparison.OrdinalIgnoreCase)))
+            try
             {
-                continue;
+                var name = d.FriendlyName;
+                if (IsVbVirtualRender(name) ||
+                    blockedNames.Any(b => name.Contains(b, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+                var present = active.Contains(d.ID);
+                result.Add(new RenderInfo(d.ID, name, DescribeFormat(d), present));
             }
-            var present = active.Contains(d.ID);
-            result.Add(new RenderInfo(d.ID, name, DescribeFormat(d), present));
+            catch (Exception)
+            {
+                // 设备状态变化竞态,跳过该项
+            }
         }
         return result;
+    }
+
+    /// <summary>当前处于 Active 状态的渲染端点 ID 集合(看门狗巡检用,轻量,不含格式描述)。</summary>
+    public HashSet<string> GetActiveRenderIds() => ActiveRenderIdsCore();
+
+    private HashSet<string> ActiveRenderIdsCore()
+    {
+        var active = new HashSet<string>();
+        foreach (var d in _enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+        {
+            try
+            {
+                active.Add(d.ID);
+            }
+            catch (Exception)
+            {
+                // 设备状态变化竞态(枚举瞬间被拔/插入),跳过该项
+            }
+        }
+        return active;
     }
 
     /// <summary>打开目标渲染设备(调用方负责 Dispose)。</summary>

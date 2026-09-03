@@ -39,6 +39,11 @@ public sealed class DispatcherEngine : IDisposable
     private DateTime _lastDataUtc = DateTime.UtcNow;
     private DateTime _lastContentUtc = DateTime.UtcNow;
     private DateTime _lastRestartUtc = DateTime.MinValue;
+    private DateTime _lastTargetScanUtc = DateTime.UtcNow;
+    // 目标启动失败/中断的退避重试(熄屏恢复、设备未就绪等场景)
+    private readonly Dictionary<string, DateTime> _retryAfter = new();
+    private readonly Dictionary<string, int> _retryCount = new();
+    private DateTime _lastVolumeWarnUtc = DateTime.MinValue;
 
     // ---- 事件(均在非音频线程触发,UI 自行 marshal) ----
     public event Action? EndpointsChanged;
@@ -211,7 +216,7 @@ public sealed class DispatcherEngine : IDisposable
         }
         catch (Exception ex)
         {
-            AppLog.Warn($"读取运行目标 {deviceId} 端点音量失败: {ex.Message}");
+            WarnVolumeThrottled($"读取运行目标 {deviceId} 端点音量失败: {ex.Message}");
         }
 
         // 目标未在分发:瞬时打开设备执行(滑块拖动高频,但 Activate 开销 ~0.1ms 级)
@@ -226,12 +231,23 @@ public sealed class DispatcherEngine : IDisposable
         }
         catch (Exception ex)
         {
-            AppLog.Warn($"设置设备 {deviceId} 端点音量失败: {ex.Message}");
+            WarnVolumeThrottled($"设置设备 {deviceId} 端点音量失败: {ex.Message}");
         }
         finally
         {
             dev.Dispose();
         }
+    }
+
+    private void WarnVolumeThrottled(string message)
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastVolumeWarnUtc < TimeSpan.FromSeconds(10))
+        {
+            return;
+        }
+        _lastVolumeWarnUtc = now;
+        AppLog.Warn(message);
     }
 
     public void SetBufferMs(int ms)
@@ -316,28 +332,116 @@ public sealed class DispatcherEngine : IDisposable
         {
             return;
         }
+        if (DateTime.UtcNow < _retryAfter.GetValueOrDefault(deviceId))
+        {
+            return; // 退避期内
+        }
         var device = _devices.OpenRenderDevice(deviceId);
         if (device == null)
         {
+            BackoffLocked(deviceId);
             _errors[deviceId] = "设备不存在";
             return;
         }
         try
         {
             var target = new TargetOutput(device, _source!.SampleRate);
+            target.PlaybackStopped += ex => OnTargetPlaybackStopped(target, ex);
             target.Start(_bufferMs);
             _targets.Add(target);
             _targetById[deviceId] = target;
             _targetSnapshot = _targets.ToArray(); // 持锁刷新音频线程快照
+            ClearBackoffLocked(deviceId);
             _errors.Remove(deviceId);
             AppLog.Info($"目标启动: {target.Name}");
         }
         catch (Exception ex)
         {
+            BackoffLocked(deviceId);
             _errors[deviceId] = ex.Message;
             device.Dispose();
-            AppLog.Error(ex, $"目标启动失败: {deviceId}");
+            AppLog.Warn($"目标启动失败(将退避重试): {deviceId}: {ex.Message}");
             TargetError?.Invoke(deviceId, ex.Message);
+        }
+    }
+
+    private void BackoffLocked(string deviceId)
+    {
+        var n = _retryCount.GetValueOrDefault(deviceId) + 1;
+        _retryCount[deviceId] = n;
+        var delaySec = Math.Min(2 * n, 30); // 2s 起,指数到 30s 封顶
+        _retryAfter[deviceId] = DateTime.UtcNow.AddSeconds(delaySec);
+    }
+
+    private void ClearBackoffLocked(string deviceId)
+    {
+        _retryAfter.Remove(deviceId);
+        _retryCount.Remove(deviceId);
+    }
+
+    /// <summary>渲染流意外中断(设备会话失效,如 HDMI 熄屏/驱动重置)→ 停掉该路并按退避自动重启。</summary>
+    private void OnTargetPlaybackStopped(TargetOutput target, Exception? ex)
+    {
+        lock (_lock)
+        {
+            if (!_targetById.ContainsKey(target.DeviceId))
+            {
+                return; // 引擎主动停止(已移除),忽略 NAudio 停止事件
+            }
+            StopTargetLocked(target.DeviceId, "播放中断");
+            BackoffLocked(target.DeviceId);
+            var msg = ex != null ? $"播放中断: {ex.Message}" : "播放中断";
+            _errors[target.DeviceId] = msg;
+            AppLog.Warn($"目标播放中断,退避重试: {target.Name}: {ex?.Message}");
+            TargetError?.Invoke(target.DeviceId, "设备会话中断,正在自动恢复…");
+        }
+    }
+
+    /// <summary>
+    /// 目标周期巡检(2s):运行中目标端点消失则停;配置启用、端点在线但未运行(启动失败/中断/熄屏恢复)的按退避重启。
+    /// 不依赖设备通知事件,覆盖通知缺失或恢复时机未就绪的场景。
+    /// </summary>
+    private void TargetMaintenanceLocked()
+    {
+        if (!_running || _source == null)
+        {
+            return;
+        }
+        HashSet<string> active;
+        try
+        {
+            active = _devices.GetActiveRenderIds();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"目标巡检枚举失败(下轮重试): {ex.Message}");
+            return;
+        }
+        var now = DateTime.UtcNow;
+
+        // 1) 端点已不在 Active → 停(引擎显示目标会话状态与设备实际一致)
+        foreach (var t in _targets.ToArray())
+        {
+            if (!active.Contains(t.DeviceId))
+            {
+                StopTargetLocked(t.DeviceId, "端点离线(巡检)");
+                BackoffLocked(t.DeviceId);
+                TargetError?.Invoke(t.DeviceId, "设备已断开,自动恢复中…");
+            }
+        }
+
+        // 2) 配置启用 + 端点在线 + 未运行 + 过了退避期 → 启动
+        foreach (var cfg in _settings.Targets)
+        {
+            if (!cfg.Enabled || _targetById.ContainsKey(cfg.DeviceId) || !active.Contains(cfg.DeviceId))
+            {
+                continue;
+            }
+            if (now < _retryAfter.GetValueOrDefault(cfg.DeviceId))
+            {
+                continue;
+            }
+            TryStartTargetLocked(cfg.DeviceId);
         }
     }
 
@@ -518,6 +622,13 @@ public sealed class DispatcherEngine : IDisposable
                 }
 
                 var now = DateTime.UtcNow;
+
+                // 0) 目标周期巡检(熄屏/断线恢复不依赖通知事件)
+                if ((now - _lastTargetScanUtc).TotalSeconds >= 2)
+                {
+                    _lastTargetScanUtc = now;
+                    TargetMaintenanceLocked();
+                }
 
                 // 1) 设备级故障:数据帧完全停止 6s → 重建捕获
                 var frames = _source.TotalFrames;

@@ -14,6 +14,8 @@ namespace AudioDispatcher.Audio;
 public sealed class TargetOutput : IDisposable
 {
     private readonly MMDevice _device;
+    private readonly string _deviceId;
+    private readonly string _deviceName;
     private readonly int _sourceRate;
     private readonly WaveFormat _mixFormat;
     private readonly object _sync = new();
@@ -31,15 +33,22 @@ public sealed class TargetOutput : IDisposable
     public TargetOutput(MMDevice device, int sourceRate)
     {
         _device = device;
+        // 设备标识构造时缓存:熄屏/断连后 MMDevice COM 引用会失效(RCW 断链),
+        // 运行期任何 COM 调用都会抛 E_NOINTERFACE,导致巡检/恢复逻辑炸掉。
+        _deviceId = device.ID;
+        _deviceName = device.FriendlyName;
         _sourceRate = sourceRate;
         _mixFormat = device.AudioClient.MixFormat;
     }
 
     public MMDevice Device => _device;
-    public string DeviceId => _device.ID;
-    public string Name => _device.FriendlyName;
+    public string DeviceId => _deviceId;
+    public string Name => _deviceName;
     public WaveFormat OutputFormat => _mixFormat;
     public bool IsRunning => _out != null;
+
+    /// <summary>渲染流非主动停止(设备会话中断/故障)时触发,由引擎决定重启。</summary>
+    public event Action<Exception?>? PlaybackStopped;
 
     /// <summary>启动渲染流。失败抛出(设备被占用/失效),由引擎决定处置。</summary>
     public void Start(int bufferMs)
@@ -61,6 +70,7 @@ public sealed class TargetOutput : IDisposable
         {
             var latency = Math.Clamp(bufferMs, 20, 500);
             _out = new WasapiOut(_device, AudioClientShareMode.Shared, useEventSync: true, latency);
+            _out.PlaybackStopped += OnPlaybackStopped;
             _out.Init(outProvider);
             _out.Play();
         }
@@ -69,6 +79,13 @@ public sealed class TargetOutput : IDisposable
             Stop();
             throw new InvalidOperationException($"设备 {Name} 渲染流启动失败: {ex.Message}", ex);
         }
+    }
+
+    private void OnPlaybackStopped(object? sender, StoppedEventArgs e)
+    {
+        // 引擎主动停止时先从自身列表移除再 Dispose,事件在此处不再需要上报;
+        // 这里只对仍处于运行状态的意外停止转发。
+        PlaybackStopped?.Invoke(e.Exception);
     }
 
     public void Stop()
