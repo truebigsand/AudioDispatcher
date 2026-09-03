@@ -20,7 +20,10 @@ public partial class App : Application
 
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
         {
-            Logging.AppLog.Error(args.ExceptionObject as Exception, "未处理的应用域异常");
+            if (args.ExceptionObject is Exception ex)
+            {
+                Logging.AppLog.Error(ex, "未处理的应用域异常");
+            }
         };
 
         // 壳层(托盘 + 主窗口)由 AppShell 管理,不设置 StartupUri。
