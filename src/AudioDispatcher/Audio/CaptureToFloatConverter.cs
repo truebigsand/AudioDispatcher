@@ -49,15 +49,10 @@ public sealed class CaptureToFloatConverter
             }
             else
             {
-                var sum = 0.0;
-                for (var c = 0; c < _channels; c++)
-                {
-                    sum += ReadSample(src, p + c * _bytesPerSample, _bytesPerSample, _isFloat);
-                }
+                // 多通道(新版 VB-Cable 16ch):取前两声道(FL/FR),环绕声道丢弃。
+                l = ReadSample(src, p, _bytesPerSample, _isFloat);
+                r = ReadSample(src, p + _bytesPerSample, _bytesPerSample, _isFloat);
                 p += _bytesPerSample * _channels;
-                var avg = (float)(sum / _channels);
-                l = avg;
-                r = avg;
             }
             out2ch[w++] = l;
             out2ch[w++] = r;

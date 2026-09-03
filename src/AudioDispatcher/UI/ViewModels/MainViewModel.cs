@@ -52,6 +52,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>RefreshDevices 重建源列表期间置位,抑制 SelectionChanged 副作用。</summary>
+    public bool SuppressSourceSelection { get; set; }
+
     public string SourceLine { get => _sourceLine; private set { _sourceLine = value; On(nameof(SourceLine)); } }
     public Brush SourceBrush { get => _sourceBrush; private set { _sourceBrush = value; On(nameof(SourceBrush)); } }
     public string RunButtonText { get => _runButtonText; private set { _runButtonText = value; On(nameof(RunButtonText)); } }
@@ -64,20 +67,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// <summary>源候选与设备清单刷新(引擎 EndpointsChanged / 启动时)。UI 线程调用。</summary>
     public void RefreshDevices()
     {
-        // 源下拉(保留当前选择)
+        // 源下拉(保留当前选择);重建期间抑制 SelectionChanged 副作用,
+        // 否则 ComboBox 绑定推送会触发主窗口"切换源"逻辑(运行中全停/重启风暴)。
         var selectedId = SelectedSource?.Id ?? _settings.SourceDeviceId;
-        Sources.Clear();
-        foreach (var s in _engine.SourceCandidates())
+        SuppressSourceSelection = true;
+        try
         {
-            Sources.Add(s);
-            if (s.Id == selectedId)
+            Sources.Clear();
+            foreach (var s in _engine.SourceCandidates())
             {
-                SelectedSource = s;
+                Sources.Add(s);
+                if (s.Id == selectedId)
+                {
+                    SelectedSource = s;
+                }
+            }
+            if (SelectedSource == null && Sources.Count > 0)
+            {
+                SelectedSource = Sources[0];
             }
         }
-        if (SelectedSource == null && Sources.Count > 0)
+        finally
         {
-            SelectedSource = Sources[0];
+            SuppressSourceSelection = false;
         }
 
         // 设备行:按引擎候选重建,行实例按 Id 复用(保留勾选/音量不闪跳)

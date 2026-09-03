@@ -132,17 +132,28 @@ public partial class MainWindow : Window
 
     private void OnSourceSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_vm.SelectedSource is { } src)
+        if (_vm.SuppressSourceSelection)
         {
-            _settings.SourceDeviceId = src.Id;
-            ScheduleSave();
-            if (_vm.Running)
-            {
-                // 运行中切源 = 停止后按新源重启
-                _engine.SetRunning(false);
-                _engine.SetRunning(true);
-                _vm.RefreshSourceState();
-            }
+            return; // 代码重建源列表,非用户操作
+        }
+        if (_vm.SelectedSource is not { } src)
+        {
+            return;
+        }
+        // 与已应用源相同(自动恢复/重复刷新)→ 不打扰运行状态
+        var applied = _engine.Source?.Device.ID;
+        if (src.Id == _settings.SourceDeviceId && (applied == null || applied == src.Id))
+        {
+            return;
+        }
+        _settings.SourceDeviceId = src.Id;
+        ScheduleSave();
+        if (_vm.Running)
+        {
+            // 用户切换源 = 停止后按新源重启
+            _engine.SetRunning(false);
+            _engine.SetRunning(true);
+            _vm.RefreshSourceState();
         }
     }
 
@@ -160,7 +171,8 @@ public partial class MainWindow : Window
 
     // ═══════════════════ 设备行交互 ═══════════════════
 
-    private DeviceRowViewModel RowOf(object sender) => (DeviceRowViewModel)((FrameworkElement)sender).DataContext;
+    private DeviceRowViewModel? RowOf(object sender) =>
+        (sender as FrameworkElement)?.DataContext as DeviceRowViewModel;
 
     private void OnRowChecked(object sender, RoutedEventArgs e)
     {
@@ -168,7 +180,10 @@ public partial class MainWindow : Window
         {
             return;
         }
-        var row = RowOf(sender);
+        if (RowOf(sender) is not { } row)
+        {
+            return;
+        }
         _engine.SetTargetEnabled(row.Id, row.IsChecked);
         row.Error = _engine.GetError(row.Id) ?? "";
         ScheduleSave();
@@ -180,7 +195,10 @@ public partial class MainWindow : Window
         {
             return;
         }
-        var row = RowOf(sender);
+        if (RowOf(sender) is not { } row)
+        {
+            return;
+        }
         _engine.SetVolume(row.Id, row.Volume / 100.0);
         ScheduleSave();
     }
@@ -191,14 +209,20 @@ public partial class MainWindow : Window
         {
             return;
         }
-        var row = RowOf(sender);
+        if (RowOf(sender) is not { } row)
+        {
+            return;
+        }
         _engine.SetMuted(row.Id, row.IsMuted);
         ScheduleSave();
     }
 
     private void OnRowTestTone(object sender, RoutedEventArgs e)
     {
-        var row = RowOf(sender);
+        if (RowOf(sender) is not { } row)
+        {
+            return;
+        }
         _engine.PlayTestTone(row.Id);
     }
 

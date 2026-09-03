@@ -65,7 +65,9 @@ public sealed class DeviceService : IDisposable
 
     /// <summary>
     /// 渲染候选(目标设备列表)。Present=false 表示设备存在但不在 Active 状态(已拔/休眠)。
-    /// 防环:排除 VB-Audio 虚拟线 Input(render 端)+ blockedNames 匹配项。
+    /// 防环:排除全部 VB-Audio 虚拟线 render 端(新版驱动命名为
+    /// "扬声器 (VB-Audio Virtual Cable)" / "CABLE In 16 Ch",不能按 Input 后缀匹配)
+    /// + blockedNames 匹配项。
     /// </summary>
     public List<RenderInfo> RenderCandidates(IReadOnlyCollection<string> blockedNames)
     {
@@ -81,7 +83,8 @@ public sealed class DeviceService : IDisposable
         foreach (var d in all)
         {
             var name = d.FriendlyName;
-            if (IsVbVirtualInput(name) || blockedNames.Any(b => name.Contains(b, StringComparison.OrdinalIgnoreCase)))
+            if (IsVbVirtualRender(name) ||
+                blockedNames.Any(b => name.Contains(b, StringComparison.OrdinalIgnoreCase)))
             {
                 continue;
             }
@@ -105,9 +108,8 @@ public sealed class DeviceService : IDisposable
         }
     }
 
-    private static bool IsVbVirtualInput(string name) =>
-        name.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase) &&
-        name.EndsWith("Input", StringComparison.OrdinalIgnoreCase);
+    private static bool IsVbVirtualRender(string name) =>
+        name.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase);
 
     private static string DescribeFormat(MMDevice d)
     {

@@ -151,6 +151,11 @@ public sealed class TargetOutput : IDisposable
             tone[i * 2 + 1] = v;
         }
 
+        var wasSilent = SilentMode;
+        if (wasSilent)
+        {
+            SilentMode = false; // 静默态下读端不消费,先放行让测试音能播出
+        }
         lock (_sync)
         {
             CapturePaused = true;
@@ -166,6 +171,23 @@ public sealed class TargetOutput : IDisposable
                 w += n;
             }
             CapturePaused = false;
+        }
+
+        if (wasSilent)
+        {
+            // 若期间捕获没有恢复(ring 仍空),播放完测试音后回到静默,避免欠载统计暴涨。
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(500);
+                lock (_sync)
+                {
+                    if (!SilentMode && !CapturePaused && _ring.AvailableFrames == 0)
+                    {
+                        SilentMode = true;
+                        _ring.Clear();
+                    }
+                }
+            });
         }
     }
 

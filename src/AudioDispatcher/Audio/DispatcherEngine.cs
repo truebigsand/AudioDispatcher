@@ -29,12 +29,15 @@ public sealed class DispatcherEngine : IDisposable
     private readonly Dictionary<string, TargetOutput> _targetById = new();
     private List<RenderInfo> _candidates = new();
     private List<SourceInfo> _sourceCandidates = new();
+    // 音频线程(捕获回调/渲染)经此快照访问目标列表,避免与 UI 持锁(设备启停/枚举)互等
+    private volatile TargetOutput[] _targetSnapshot = System.Array.Empty<TargetOutput>();
 
     private volatile bool _running;
     private volatile bool _silent;
     private int _bufferMs;
     private long _lastWatchFrames;
     private DateTime _lastDataUtc = DateTime.UtcNow;
+    private DateTime _lastContentUtc = DateTime.UtcNow;
     private DateTime _lastRestartUtc = DateTime.MinValue;
 
     // ---- 事件(均在非音频线程触发,UI 自行 marshal) ----
@@ -118,6 +121,7 @@ public sealed class DispatcherEngine : IDisposable
             StartAllTargetsLocked();
             SetRunningField(true);
             _lastDataUtc = DateTime.UtcNow;
+            _lastContentUtc = DateTime.UtcNow;
             _silent = false;
             AppLog.Info($"分发启动: {_targets.Count} 个目标设备, 缓冲 {_bufferMs}ms");
             return true;
@@ -285,6 +289,7 @@ public sealed class DispatcherEngine : IDisposable
             target.Start(_bufferMs);
             _targets.Add(target);
             _targetById[deviceId] = target;
+            _targetSnapshot = _targets.ToArray(); // 持锁刷新音频线程快照
             _errors.Remove(deviceId);
             AppLog.Info($"目标启动: {target.Name}");
         }
@@ -302,6 +307,7 @@ public sealed class DispatcherEngine : IDisposable
         if (_targetById.Remove(deviceId, out var t))
         {
             _targets.Remove(t);
+            _targetSnapshot = _targets.ToArray(); // 持锁刷新音频线程快照
             try
             {
                 t.Dispose();
@@ -372,16 +378,13 @@ public sealed class DispatcherEngine : IDisposable
 
     private void OnSamplesReady(float[] samples, int count)
     {
-        TargetOutput[] targets;
-        lock (_lock)
+        // 无锁路径:快照由结构变更方在持锁时刷新
+        var targets = _targetSnapshot;
+        if (targets.Length == 0)
         {
-            if (_source == null)
-            {
-                return;
-            }
-            _lastDataUtc = DateTime.UtcNow;
-            targets = _targets.ToArray();
+            return;
         }
+        _lastDataUtc = DateTime.UtcNow;
         var frames = count / 2;
         foreach (var t in targets)
         {
@@ -475,14 +478,29 @@ public sealed class DispatcherEngine : IDisposable
                     return;
                 }
 
-                var frames = _source.TotalFrames;
-                var hasData = frames != _lastWatchFrames;
-                _lastWatchFrames = frames;
                 var now = DateTime.UtcNow;
 
-                if (hasData)
+                // 1) 设备级故障:数据帧完全停止 6s → 重建捕获
+                var frames = _source.TotalFrames;
+                var hasFrames = frames != _lastWatchFrames;
+                _lastWatchFrames = frames;
+                if (!hasFrames && now - _lastDataUtc > TimeSpan.FromSeconds(6))
+                {
+                    AppLog.Warn("源数据帧停止超过 6s,尝试重建捕获");
+                    TryRestartSourceLocked();
+                    _lastDataUtc = now;
+                    return;
+                }
+                if (hasFrames)
                 {
                     _lastDataUtc = now;
+                }
+
+                // 2) 内容级静默:帧在流动但都是静音(如无应用播放)→ 目标静默
+                var hasContent = _source.LastLevelRms > 0.001f; // ≈ -60 dBFS
+                if (hasContent)
+                {
+                    _lastContentUtc = now;
                     if (_silent)
                     {
                         _silent = false;
@@ -490,27 +508,17 @@ public sealed class DispatcherEngine : IDisposable
                         {
                             t.ResumeFromSilence();
                         }
-                        AppLog.Info("源数据恢复,退出静默");
+                        AppLog.Info("源声音内容恢复,退出静默");
                     }
                 }
-                else
+                else if (!_silent && now - _lastContentUtc > TimeSpan.FromSeconds(1))
                 {
-                    var quiet = now - _lastDataUtc;
-                    if (quiet > TimeSpan.FromSeconds(1) && !_silent)
+                    _silent = true;
+                    foreach (var t in _targets)
                     {
-                        _silent = true;
-                        foreach (var t in _targets)
-                        {
-                            t.EnterSilentMode();
-                        }
-                        AppLog.Warn("源无数据超过 1s,目标进入静默");
+                        t.EnterSilentMode();
                     }
-                    else if (quiet > TimeSpan.FromSeconds(6))
-                    {
-                        AppLog.Warn("源长时间无数据,尝试重建捕获");
-                        TryRestartSourceLocked();
-                        _lastDataUtc = now;
-                    }
+                    AppLog.Warn("源无声音内容超过 1s(无应用在播放),目标进入静默");
                 }
             }
         }

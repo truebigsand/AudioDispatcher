@@ -20,6 +20,12 @@ public sealed class SourceCapture : IDisposable
     private float[] _outBuf = new float[0];
     private long _totalFrames;
     private bool _running;
+    private double _rmsAcc;
+    private long _rmsCount;
+    private DateTime _windowStart = DateTime.UtcNow;
+
+    /// <summary>捕获内容 RMS(250ms 窗口)。引擎据此判断"是否有声音内容"而非"是否有数据帧"。</summary>
+    public volatile float LastLevelRms;
 
     public SourceCapture(MMDevice device)
     {
@@ -101,12 +107,32 @@ public sealed class SourceCapture : IDisposable
             if (written > 0)
             {
                 Interlocked.Add(ref _totalFrames, written / 2);
+                UpdateLevel(_outBuf, written);
                 SamplesReady?.Invoke(_outBuf, written);
             }
         }
         catch (Exception ex)
         {
             AppLog.Error(ex, "捕获数据处理失败");
+        }
+    }
+
+    private void UpdateLevel(float[] samples, int count)
+    {
+        var sum = 0.0;
+        for (var i = 0; i < count; i++)
+        {
+            sum += samples[i] * samples[i];
+        }
+        _rmsAcc += sum;
+        _rmsCount += count;
+        var now = DateTime.UtcNow;
+        if ((now - _windowStart).TotalMilliseconds >= 250)
+        {
+            LastLevelRms = _rmsCount > 0 ? (float)Math.Sqrt(_rmsAcc / _rmsCount) : 0f;
+            _rmsAcc = 0;
+            _rmsCount = 0;
+            _windowStart = now;
         }
     }
 
