@@ -92,14 +92,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
             SuppressSourceSelection = false;
         }
 
-        // 设备行:按引擎候选重建,行实例按 Id 复用(保留勾选/音量不闪跳)
-        var ids = _engine.Candidates.Select(c => c.Id).ToHashSet();
+        // 设备行:可用(在线)设备排在前面,组内保持枚举顺序(OrderBy 稳定)
+        var ordered = _engine.Candidates
+            .OrderByDescending(c => c.Present)
+            .ToList();
+        var ids = ordered.Select(c => c.Id).ToHashSet();
         foreach (var stale in _rows.Keys.Where(id => !ids.Contains(id)).ToArray())
         {
             _rows.Remove(stale);
         }
         Devices.Clear();
-        foreach (var c in _engine.Candidates)
+        foreach (var c in ordered)
         {
             if (!_rows.TryGetValue(c.Id, out var row))
             {
