@@ -165,10 +165,12 @@ public sealed class AppShell
         _window.AllowClose = true;
         _window.Close(); // Closing 内保存窗口位置与设置
 
+        // 设备释放放后台尽力执行;NAudio 前台线程在设备释放卡住时可能阻止进程退出,
+        // 因此用 Environment.Exit 确定性结束(音频会话由操作系统随进程回收)
+        _tray.Dispose();
         _engine.Dispose();
         _devices.Dispose();
-        _tray.Dispose();
-        Application.Current.Shutdown();
+        Environment.Exit(0);
     }
 
     private void OnAutoStartChanged(bool enabled)
