@@ -154,14 +154,9 @@ public sealed class AppShell
 
     private void OnExitRequested()
     {
-        var msg = "确定退出 AudioDispatcher 吗?\n\n提示:若系统默认输出仍指向 CABLE Input,退出后将没有声音,请先切回原设备。";
-        if (MessageBox.Show(msg, "退出 AudioDispatcher", MessageBoxButtons.OKCancel,
-                            MessageBoxIcon.Question) != DialogResult.OK)
-        {
-            return;
-        }
+        // 第一行留痕:任何卡点都能在日志中定位
         AppLog.Info("用户退出应用");
-        // 保存设置后立即强制退出:不经过窗口关闭/托盘/音频释放等任何可能卡住的清理,
+        // 保存设置后立即强制退出:不经窗口关闭/托盘/音频释放等任何可能卡住的清理,
         // 音频会话与 COM 资源由操作系统随进程回收
         try
         {
