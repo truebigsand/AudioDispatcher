@@ -161,15 +161,24 @@ public sealed class AppShell
             return;
         }
         AppLog.Info("用户退出应用");
+        // 保存设置后立即强制退出:不经过窗口关闭/托盘/音频释放等任何可能卡住的清理,
+        // 音频会话与 COM 资源由操作系统随进程回收
+        try
+        {
+            if (_window.WindowState == System.Windows.WindowState.Normal)
+            {
+                _settings.WindowLeft = _window.Left;
+                _settings.WindowTop = _window.Top;
+            }
+            _settings.WindowWidth = _window.Width;
+            _settings.WindowHeight = _window.Height;
+            SettingsService.Save(_settings);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error(ex, "退出时保存设置失败");
+        }
         _trayStateTimer.Stop();
-        _window.AllowClose = true;
-        _window.Close(); // Closing 内保存窗口位置与设置
-
-        // 设备释放放后台尽力执行;NAudio 前台线程在设备释放卡住时可能阻止进程退出,
-        // 因此用 Environment.Exit 确定性结束(音频会话由操作系统随进程回收)
-        _tray.Dispose();
-        _engine.Dispose();
-        _devices.Dispose();
         Environment.Exit(0);
     }
 
