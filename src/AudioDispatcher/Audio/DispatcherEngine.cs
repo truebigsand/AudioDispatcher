@@ -46,6 +46,7 @@ public sealed class DispatcherEngine : IDisposable
     // 目标启动失败/中断的退避重试(熄屏恢复、设备未就绪等场景)
     private readonly Dictionary<string, DateTime> _retryAfter = new();
     private readonly Dictionary<string, int> _retryCount = new();
+    private readonly Dictionary<string, DateTime> _stoppedAtUtc = new(); // 停路时间(振荡抑制)
     private readonly HashSet<string> _startingIds = new(); // 已排队启动(防巡检/StartAll 重复入队)
     private DateTime _lastVolumeWarnUtc = DateTime.MinValue;
     private DateTime _lastLockStallWarnUtc = DateTime.MinValue;
@@ -514,7 +515,17 @@ public sealed class DispatcherEngine : IDisposable
     {
         var n = _retryCount.GetValueOrDefault(deviceId) + 1;
         _retryCount[deviceId] = n;
-        var delaySec = Math.Min(2 * n, 10); // 2s 起,指数到 10s 封顶(熄屏恢复别等太久)
+        // 指数退避:2/4/8/16/32/60s 封顶。设备持续不可用(启动失败/反复中断)时
+        // 把尝试频率压到每分钟一次,避免空转占用 CPU/COM
+        var delaySec = n switch
+        {
+            1 => 2,
+            2 => 4,
+            3 => 8,
+            4 => 16,
+            5 => 32,
+            _ => 60,
+        };
         _retryAfter[deviceId] = DateTime.UtcNow.AddSeconds(delaySec);
     }
 
@@ -605,6 +616,7 @@ public sealed class DispatcherEngine : IDisposable
         {
             _targets.Remove(t);
             _targetSnapshot = _targets.ToArray(); // 持锁刷新音频线程快照
+            _stoppedAtUtc[deviceId] = DateTime.UtcNow;
             AppLog.Info($"目标停止({reason}): {deviceId}");
             // Dispose(COM)在后台执行器释放,锁内不碰音频
             EnqueueAudioOp(() =>
@@ -764,10 +776,12 @@ public sealed class DispatcherEngine : IDisposable
 
                 SourceMaintenanceLocked();
                 StopOfflineTargetsLocked();
-                // 端点从离线恢复在线:清除该设备的退避并立即重试一次(唤醒后不用等退避到期)
+                // 端点从离线恢复在线:若该设备近期没有反复启停(10s 冷却),清除退避并
+                // 立即重试一次;振荡设备(状态秒级横跳)不触发快路径,由退避+巡检压制
                 var nowPresent = _candidates.Where(c => c.Present).Select(c => c.Id).ToHashSet();
                 if (_lastPresentIds.Count > 0)
                 {
+                    var now = DateTime.UtcNow;
                     foreach (var id in nowPresent)
                     {
                         if (_lastPresentIds.Contains(id))
@@ -775,7 +789,8 @@ public sealed class DispatcherEngine : IDisposable
                             continue;
                         }
                         var cfg = _settings.Targets.FirstOrDefault(t => t.DeviceId == id);
-                        if (cfg is { Enabled: true } && !_targetById.ContainsKey(id))
+                        if (cfg is { Enabled: true } && !_targetById.ContainsKey(id) &&
+                            now - _stoppedAtUtc.GetValueOrDefault(id) > TimeSpan.FromSeconds(10))
                         {
                             ClearBackoffLocked(id);
                             TryStartTargetLocked(id);
@@ -1003,11 +1018,18 @@ public sealed class DispatcherEngine : IDisposable
             _errors.Clear();
             _silent = false;
         }
-        // 退出路径:同步释放(进程即将结束,允许短暂阻塞)
-        foreach (var d in toDispose)
+        // 释放放后台执行器,不阻塞退出:设备释放(COM)可能挂起,进程退出时
+        // 由操作系统回收音频会话,绝不让退出流程卡住
+        if (toDispose.Count > 0)
         {
-            try { d.Dispose(); }
-            catch { }
+            EnqueueAudioOp(() =>
+            {
+                foreach (var d in toDispose)
+                {
+                    try { d.Dispose(); }
+                    catch { }
+                }
+            });
         }
     }
 }
