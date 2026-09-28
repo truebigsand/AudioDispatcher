@@ -1,7 +1,9 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Channels;
 using AudioDispatcher.Logging;
 using AudioDispatcher.Settings;
 using NAudio.CoreAudioApi;
@@ -11,8 +13,8 @@ namespace AudioDispatcher.Audio;
 /// <summary>
 /// 分发编排核心。
 /// - 运行状态机:SetRunning 启动/停止捕获与全部已启用目标;
-/// - 数据路径:SourceCapture.SamplesReady → 各 TargetOutput.WriteSamples(捕获线程),
-///   转发永不门控;检测到内容块时仅即时清除逻辑静默标志;
+/// - 数据路径:捕获回调(转换+入队)→ 有界块队列 → 转发线程(随分发开关启停)
+///   → 各 TargetOutput.WriteSamples;转发永不门控,检测到内容块仅即时清除逻辑静默标志;
 /// - watchdog(500ms):源数据停止检测(进入静默/重建捕获)、设备热插拔刷新、断线目标自动处置;
 /// - UI 通过事件感知结构变化,通过轮询快照读实时值(电平/统计)。
 /// 线程纪律:_lock 保护结构;volatile 保护状态标志;渲染/捕获线程只经各自对象锁。
@@ -104,6 +106,19 @@ public sealed class DispatcherEngine : IDisposable
         _devices = devices;
         _settings = settings;
         _bufferMs = settings.BufferMs;
+        _forwardChannel = Channel.CreateBounded<ForwardBlock>(
+            new BoundedChannelOptions(4)
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                FullMode = BoundedChannelFullMode.DropOldest,
+            },
+            block =>
+            {
+                Interlocked.Add(ref _forwardDroppedFrames, block.Samples / 2);
+                WarnForwardDropThrottled();
+                ArrayPool<float>.Shared.Return(block.Buffer);
+            });
         _devices.Changed += OnDevicesChanged;
         _masterMonitor.Changed += OnMasterVolumeChanged;
         _watchdog = new Timer(_ => OnTick(), null, 300, 500);
@@ -164,6 +179,8 @@ public sealed class DispatcherEngine : IDisposable
                 return true;
             }
 
+            // 转发线程随分发开关启停:先于源启动,不丢首批块
+            StartForwardLoopLocked();
             // 启动
             if (_source == null && !TryEnsureSourceLocked())
             {
@@ -566,6 +583,120 @@ public sealed class DispatcherEngine : IDisposable
         }
     }
 
+    // ---- 转发线程:捕获回调只做转换+入队,扇出由本循环完成(随分发开关启停) ----
+    // 队列容量 4 块(约 80ms@20ms/块),满则丢最旧(与漂移补偿语义一致,绝不阻塞捕获回调)。
+    // 在构造函数创建:丢块回调要引用实例成员,字段初始化器不允许。
+    private readonly Channel<ForwardBlock> _forwardChannel;
+    private CancellationTokenSource? _forwardCts;
+    private Task? _forwardTask;
+    private long _forwardDroppedFrames;
+    private DateTime _lastForwardDropWarnUtc = DateTime.MinValue;
+
+    /// <summary>一块待转发样本(池化缓冲,消费方负责归还)。Samples 为 float 样本数(帧数×2)。</summary>
+    private readonly record struct ForwardBlock(float[] Buffer, int Samples, float ChunkRms);
+
+    /// <summary>转发队列满丢弃的累计帧数(仅极端卡顿时非零)。</summary>
+    public long ForwardDroppedFrames => Interlocked.Read(ref _forwardDroppedFrames);
+
+    /// <summary>队列满丢块限频告警(10s 一次,避免刷屏)。</summary>
+    private void WarnForwardDropThrottled()
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastForwardDropWarnUtc < TimeSpan.FromSeconds(10))
+        {
+            return;
+        }
+        _lastForwardDropWarnUtc = now;
+        AppLog.Warn($"转发队列拥塞丢块,累计丢弃 {Interlocked.Read(ref _forwardDroppedFrames)} 帧");
+    }
+
+    private void StartForwardLoopLocked()
+    {
+        if (_forwardTask != null)
+        {
+            return;
+        }
+        while (_forwardChannel.Reader.TryRead(out var stale))
+        {
+            ArrayPool<float>.Shared.Return(stale.Buffer); // 清掉上次会话残留的旧块
+        }
+        _forwardCts = new CancellationTokenSource();
+        _forwardTask = Task.Run(() => ForwardLoopAsync(_forwardCts.Token));
+        AppLog.Info("转发线程已启动");
+    }
+
+    private void StopForwardLoop()
+    {
+        var task = _forwardTask;
+        var cts = _forwardCts;
+        _forwardTask = null;
+        _forwardCts = null;
+        if (task == null)
+        {
+            return;
+        }
+        cts!.Cancel();
+        // 限时等待,超时放弃:转发循环只碰托管内存(无 COM),进程退出由 OS 兜底,绝不卡退出
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await task.WaitAsync(TimeSpan.FromSeconds(2));
+                AppLog.Info("转发线程已停止");
+            }
+            catch (Exception)
+            {
+                AppLog.Warn("转发线程停止超时,放弃等待");
+            }
+        });
+    }
+
+    private async Task ForwardLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            await foreach (var block in _forwardChannel.Reader.ReadAllAsync(ct))
+            {
+                ForwardOne(block);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 正常停止
+        }
+    }
+
+    private void ForwardOne(ForwardBlock block)
+    {
+        try
+        {
+            // 静默中检测到内容块:仅翻标志(UI"等待音频数据"即时退出),转发本身不受影响
+            var targets = _targetSnapshot;
+            if (_silent && block.ChunkRms > SilentRmsThreshold)
+            {
+                _silent = false;
+                SetTargetsLogicalSilent(false);
+                AppLog.Info("源声音内容恢复,退出逻辑静默");
+            }
+            var frames = block.Samples / 2;
+            foreach (var t in targets)
+            {
+                try
+                {
+                    t.WriteSamples(block.Buffer, frames);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Error(ex, $"写入目标 {t.Name} 失败");
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(block.Buffer);
+        }
+    }
+
     /// <summary>主音量变化(COM 通知线程):写 volatile 并应用到全部运行目标。</summary>
     private void OnMasterVolumeChanged(float volume, bool muted)
     {
@@ -668,6 +799,7 @@ public sealed class DispatcherEngine : IDisposable
 
     private void StopAllLocked(string reason)
     {
+        StopForwardLoop();
         StopAllTargetsLocked();
         StopSourceLocked(reason);
         _silent = false;
@@ -695,34 +827,17 @@ public sealed class DispatcherEngine : IDisposable
         }
     }
 
+    /// <summary>捕获回调(生产者):拷入池化缓冲入队后立即返回;扇出与静默标志由转发线程完成。
+    /// 须快速返回,不得在捕获回调上做阻塞操作。</summary>
     private void OnSamplesReady(float[] samples, int count, float chunkRms)
     {
-        // 无锁路径:快照由结构变更方在持锁时刷新
-        var targets = _targetSnapshot;
-        if (targets.Length == 0)
-        {
-            return;
-        }
         _lastDataUtc = DateTime.UtcNow;
-        // 静默中检测到当前块含内容:立即清除逻辑静默标志(仅翻标志+日志,
-        // 转发本就持续,无数据操作),让 UI"等待音频数据"提示即时退出
-        if (_silent && chunkRms > SilentRmsThreshold)
+        var buf = ArrayPool<float>.Shared.Rent(count);
+        Array.Copy(samples, buf, count);
+        if (!_forwardChannel.Writer.TryWrite(new ForwardBlock(buf, count, chunkRms)))
         {
-            _silent = false;
-            SetTargetsLogicalSilent(false);
-            AppLog.Info("源声音内容恢复,退出逻辑静默");
-        }
-        var frames = count / 2;
-        foreach (var t in targets)
-        {
-            try
-            {
-                t.WriteSamples(samples, frames);
-            }
-            catch (Exception ex)
-            {
-                AppLog.Error(ex, $"写入目标 {t.Name} 失败");
-            }
+            // DropOldest 模式下仅在通道关闭后失败:防御性归还
+            ArrayPool<float>.Shared.Return(buf);
         }
     }
 
@@ -1017,6 +1132,7 @@ public sealed class DispatcherEngine : IDisposable
     public void Dispose()
     {
         _watchdog.Dispose();
+        StopForwardLoop();
         _devices.Changed -= OnDevicesChanged;
         _masterMonitor.Changed -= OnMasterVolumeChanged;
         _masterMonitor.Dispose();
