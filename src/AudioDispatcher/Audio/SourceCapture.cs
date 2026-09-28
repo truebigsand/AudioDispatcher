@@ -62,8 +62,18 @@ public sealed class SourceCapture : IDisposable
             _converter = new CaptureToFloatConverter(CaptureFormat);
             var cap = new WasapiCapture(_device, useEventSync: true, audioBufferMillisecondsLength: 20);
             cap.DataAvailable += OnDataAvailable;
+            try
+            {
+                cap.StartRecording();
+            }
+            catch
+            {
+                // 启动失败时 _running 仍为 false,Stop 会因早退而跳过释放,必须在此清理
+                cap.DataAvailable -= OnDataAvailable;
+                cap.Dispose();
+                throw;
+            }
             _capture = cap;
-            cap.StartRecording();
             _running = true;
             AppLog.Info($"源捕获已启动: {DeviceName} ({CaptureFormat.SampleRate}Hz/{CaptureFormat.BitsPerSample}bit/{CaptureFormat.Channels}ch)");
         }

@@ -221,22 +221,6 @@ public sealed class DispatcherEngine : IDisposable
         }
     }
 
-    public void SetSource(string deviceId)
-    {
-        lock (_lock)
-        {
-            if (_source != null && _source.DeviceId == deviceId)
-            {
-                return;
-            }
-            _settings.SourceDeviceId = deviceId;
-            StopSourceLocked("切换源");
-            SetRunningField(false); // 目标流先停,等待重新启动
-            StopAllTargetsLocked();
-            EndpointsChanged?.Invoke();
-        }
-    }
-
     public void SetTargetEnabled(string deviceId, bool enabled)
     {
         lock (_lock)
@@ -1162,6 +1146,9 @@ public sealed class DispatcherEngine : IDisposable
         List<IDisposable> toDispose;
         lock (_lock)
         {
+            // 复位运行标志:防止 Dispose 后仍在途的看门狗 tick / 后台设备刷新
+            // 按"运行中且无源"路径经 TryEnsureSourceLocked 复活源捕获
+            _running = false;
             toDispose = _targets.Cast<IDisposable>().ToList();
             _targets.Clear();
             _targetById.Clear();
