@@ -39,16 +39,14 @@ internal static class ToastAppIdentity
         var lnk = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.Programs),
             "AudioDispatcher.lnk");
-        if (File.Exists(lnk))
-        {
-            return;
-        }
         var exe = Environment.ProcessPath;
         if (string.IsNullOrEmpty(exe))
         {
             return;
         }
 
+        // 每次启动重写以自愈:exe 挪位置后旧快捷方式目标会失效,导致开始菜单
+        // 启动失败且 Toast 身份解析指向旧路径。写入量极小,不值得做差异检测。
         var shellLink = (IShellLinkW)new ShellLinkRCW();
         shellLink.SetPath(exe);
         shellLink.SetWorkingDirectory(Path.GetDirectoryName(exe!));
@@ -62,7 +60,7 @@ internal static class ToastAppIdentity
         store.Commit();
 
         ((IPersistFile)shellLink).Save(lnk, fRemember: true);
-        AppLog.Info($"已创建通知身份快捷方式: {lnk}");
+        AppLog.Info($"通知身份快捷方式已就绪: {lnk}");
     }
 
     [DllImport("shell32.dll", SetLastError = false)]

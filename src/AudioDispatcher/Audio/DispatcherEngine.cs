@@ -179,8 +179,6 @@ public sealed class DispatcherEngine : IDisposable
                 return true;
             }
 
-            // 转发线程随分发开关启停:先于源启动,不丢首批块
-            StartForwardLoopLocked();
             // 启动
             if (_source == null && !TryEnsureSourceLocked())
             {
@@ -204,6 +202,16 @@ public sealed class DispatcherEngine : IDisposable
         if (_running != value)
         {
             _running = value;
+            // 转发线程生命周期随运行状态迁移:启动成功/失败回退/切源停机等
+            // 全部路径经此统一启停,线程不会悬空空转。
+            if (value)
+            {
+                StartForwardLoopLocked();
+            }
+            else
+            {
+                StopForwardLoop();
+            }
             RunningChanged?.Invoke();
         }
     }
@@ -664,6 +672,11 @@ public sealed class DispatcherEngine : IDisposable
         {
             // 正常停止
         }
+        catch (Exception ex)
+        {
+            // 转发循环意外终止必须留痕:否则表现为"捕获在跑但无声",难以定位
+            AppLog.Error(ex, "转发循环异常终止");
+        }
     }
 
     private void ForwardOne(ForwardBlock block)
@@ -799,7 +812,6 @@ public sealed class DispatcherEngine : IDisposable
 
     private void StopAllLocked(string reason)
     {
-        StopForwardLoop();
         StopAllTargetsLocked();
         StopSourceLocked(reason);
         _silent = false;
