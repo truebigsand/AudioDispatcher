@@ -27,6 +27,9 @@ public sealed class SourceCapture : IDisposable
     /// <summary>捕获内容 RMS(250ms 窗口)。引擎据此判断"是否有声音内容"而非"是否有数据帧"。</summary>
     public volatile float LastLevelRms;
 
+    /// <summary>最近一个捕获回调块(约 20ms)的即时 RMS。引擎数据路径据此即时退出静默,避免丢下一段内容开头。</summary>
+    public volatile float LastChunkRms;
+
     public SourceCapture(MMDevice device)
     {
         _device = device;
@@ -44,8 +47,8 @@ public sealed class SourceCapture : IDisposable
     public int SampleRate => CaptureFormat.SampleRate;
     public bool IsRunning => _running;
 
-    /// <summary>2ch float32 交织共享缓冲(每次回调覆盖)。订阅者须同步消费。</summary>
-    public event Action<float[], int>? SamplesReady;
+    /// <summary>2ch float32 交织共享缓冲(每次回调覆盖)。订阅者须同步消费。第三参数为该块即时 RMS。</summary>
+    public event Action<float[], int, float>? SamplesReady;
 
     /// <summary>启动捕获。失败抛出,由引擎按退避策略重试。</summary>
     public void Start()
@@ -113,7 +116,7 @@ public sealed class SourceCapture : IDisposable
             {
                 Interlocked.Add(ref _totalFrames, written / 2);
                 UpdateLevel(_outBuf, written);
-                SamplesReady?.Invoke(_outBuf, written);
+                SamplesReady?.Invoke(_outBuf, written, LastChunkRms);
             }
         }
         catch (Exception ex)
@@ -129,6 +132,8 @@ public sealed class SourceCapture : IDisposable
         {
             sum += samples[i] * samples[i];
         }
+        // 块级即时 RMS:复用本次累加,供数据路径零滞后判定内容恢复
+        LastChunkRms = count > 0 ? (float)Math.Sqrt(sum / count) : 0f;
         _rmsAcc += sum;
         _rmsCount += count;
         var now = DateTime.UtcNow;

@@ -11,13 +11,17 @@ namespace AudioDispatcher.Audio;
 /// <summary>
 /// 分发编排核心。
 /// - 运行状态机:SetRunning 启动/停止捕获与全部已启用目标;
-/// - 数据路径:SourceCapture.SamplesReady → 各 TargetOutput.WriteSamples(捕获线程);
+/// - 数据路径:SourceCapture.SamplesReady → 各 TargetOutput.WriteSamples(捕获线程),
+///   并按块级 RMS 即时退出静默(避免丢下一段内容开头);
 /// - watchdog(500ms):源数据停止检测(进入静默/重建捕获)、设备热插拔刷新、断线目标自动处置;
 /// - UI 通过事件感知结构变化,通过轮询快照读实时值(电平/统计)。
 /// 线程纪律:_lock 保护结构;volatile 保护状态标志;渲染/捕获线程只经各自对象锁。
 /// </summary>
 public sealed class DispatcherEngine : IDisposable
 {
+    /// <summary>内容电平阈值(≈ -60 dBFS):低于视为静音。进入静默由看门狗 1s 滞后判定;退出由数据路径按块即时判定。</summary>
+    private const float SilentRmsThreshold = 0.001f;
+
     private readonly DeviceService _devices;
     private readonly AppSettings _settings;
     private readonly object _lock = new();
@@ -681,7 +685,7 @@ public sealed class DispatcherEngine : IDisposable
 
     // ================= 数据与看门狗 =================
 
-    private void OnSamplesReady(float[] samples, int count)
+    private void OnSamplesReady(float[] samples, int count, float chunkRms)
     {
         // 无锁路径:快照由结构变更方在持锁时刷新
         var targets = _targetSnapshot;
@@ -690,6 +694,17 @@ public sealed class DispatcherEngine : IDisposable
             return;
         }
         _lastDataUtc = DateTime.UtcNow;
+        // 静默中检测到当前块含内容:在写入前即时退出静默,保证下一段内容开头不丢
+        // (看门狗 250ms 窗口 + 500ms 节拍的双重滞后会丢 0.25~0.75s)。退出幂等,与看门狗并发安全。
+        if (_silent && chunkRms > SilentRmsThreshold)
+        {
+            _silent = false;
+            foreach (var t in targets)
+            {
+                t.ResumeFromSilence();
+            }
+            AppLog.Info("源声音内容恢复,数据路径即时退出静默");
+        }
         var frames = count / 2;
         foreach (var t in targets)
         {
@@ -948,8 +963,9 @@ public sealed class DispatcherEngine : IDisposable
             _lastDataUtc = now;
         }
 
-        // 2) 内容级静默:帧在流动但都是静音(如无应用播放)→ 目标静默
-        var hasContent = _source.LastLevelRms > 0.001f; // ≈ -60 dBFS
+        // 2) 内容级静默:帧在流动但都是静音(如无应用播放)→ 目标静默。
+        //    退出判定通常已由数据路径即时完成,这里仅兜底(块级 RMS 偏低但 250ms 窗口达阈值的极轻内容)。
+        var hasContent = _source.LastLevelRms > SilentRmsThreshold;
         if (hasContent)
         {
             _lastContentUtc = now;
@@ -960,7 +976,7 @@ public sealed class DispatcherEngine : IDisposable
                 {
                     t.ResumeFromSilence();
                 }
-                AppLog.Info("源声音内容恢复,退出静默");
+                AppLog.Info("源声音内容恢复(看门狗兜底),退出静默");
             }
         }
         else if (!_silent && now - _lastContentUtc > TimeSpan.FromSeconds(1))
