@@ -187,13 +187,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Running = _engine.Running;
     }
 
-    /// <summary>电平/丢补统计实时刷新(UI 定时器调用)。</summary>
+    /// <summary>电平/丢补统计实时刷新(UI 定时器调用)。走引擎无锁目标视图,不取引擎锁。</summary>
     public void RefreshRealtime()
     {
+        var view = _engine.TargetView;
         foreach (var row in Devices)
         {
-            var t = _engine.GetTarget(row.Id);
-            if (t != null)
+            if (view.TryGetValue(row.Id, out var t))
             {
                 row.Level = LevelToMeter(t.LevelRms);
                 var over = t.OverrunFrames;   // 64 位进程下 long 读原子

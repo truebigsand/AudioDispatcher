@@ -21,7 +21,7 @@ public sealed class AppShell
     private readonly DeviceService _devices;
     private readonly DispatcherEngine _engine;
     private readonly System.Windows.Threading.DispatcherTimer _trayStateTimer;
-    private DateTime _lastBalloonUtc = DateTime.MinValue;
+    private readonly Dictionary<string, DateTime> _lastBalloonUtc = new();
 
     public AppShell()
     {
@@ -50,7 +50,7 @@ public sealed class AppShell
         _trayStateTimer.Start();
 
         _engine.RunningChanged += () => DispatchUi(UpdateTrayState);
-        _engine.TargetError += (id, msg) => DispatchUi(() => OnTargetError(msg));
+        _engine.TargetError += (id, msg) => DispatchUi(() => OnTargetError(id, msg));
         _engine.SourceLost += msg => DispatchUi(() => OnSourceLost(msg));
 
         _window = new MainWindow(_engine, _settings);
@@ -115,26 +115,27 @@ public sealed class AppShell
         UpdateTrayState();
     }
 
-    private void OnTargetError(string message)
+    private void OnTargetError(string id, string message)
     {
-        BalloonThrottled("设备异常", message, ToolTipIcon.Warning);
+        BalloonThrottled(id + "|" + message, "设备异常", message, ToolTipIcon.Warning);
     }
 
     private void OnSourceLost(string message)
     {
         _window.RefreshFromShell();
-        BalloonThrottled("音频源丢失", message, ToolTipIcon.Error);
+        BalloonThrottled("音频源丢失", "音频源丢失", message, ToolTipIcon.Error);
     }
 
-    private void BalloonThrottled(string title, string message, ToolTipIcon icon)
+    /// <summary>气泡节流:同一来源(同设备同事件)8s 内不重复弹,不同事件互不吞并。</summary>
+    private void BalloonThrottled(string key, string title, string message, ToolTipIcon icon)
     {
         var now = DateTime.UtcNow;
-        if (now - _lastBalloonUtc < TimeSpan.FromSeconds(8))
+        if (_lastBalloonUtc.TryGetValue(key, out var last) && now - last < TimeSpan.FromSeconds(8))
         {
             AppLog.Info($"气泡被 8s 节流跳过: {title} {message}");
             return;
         }
-        _lastBalloonUtc = now;
+        _lastBalloonUtc[key] = now;
         AppLog.Info($"托盘气泡: {title} {message}");
         _tray.Balloon(title, message, icon);
     }

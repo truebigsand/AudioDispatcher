@@ -40,6 +40,8 @@ public sealed class DispatcherEngine : IDisposable
     private HashSet<string> _lastPresentIds = new(); // 上次刷新时在线端点(检测"恢复"转换)
     // 音频线程(捕获回调/渲染)经此快照访问目标列表,避免与 UI 持锁(设备启停/枚举)互等
     private volatile TargetOutput[] _targetSnapshot = System.Array.Empty<TargetOutput>();
+    // UI 实时轮询用的无锁目标视图:与 _targetSnapshot 同步重建,发布后只读,UI 读引用零锁
+    private volatile Dictionary<string, TargetOutput> _targetView = new();
 
     private volatile bool _running;
     private volatile bool _silent;
@@ -116,7 +118,6 @@ public sealed class DispatcherEngine : IDisposable
             block =>
             {
                 Interlocked.Add(ref _forwardDroppedFrames, block.Samples / 2);
-                WarnForwardDropThrottled();
                 ArrayPool<float>.Shared.Return(block.Buffer);
             });
         _devices.Changed += OnDevicesChanged;
@@ -131,6 +132,10 @@ public sealed class DispatcherEngine : IDisposable
 
     public SourceCapture? Source => _source;
     public IReadOnlyList<RenderInfo> Candidates => _candidates;
+
+    /// <summary>目标只读视图(UI 实时轮询用):一次 volatile 引用读,不取引擎锁。键=设备 ID。</summary>
+    public IReadOnlyDictionary<string, TargetOutput> TargetView => _targetView;
+
     public IReadOnlyList<TargetOutput> ActiveTargets
     {
         get
@@ -440,6 +445,13 @@ public sealed class DispatcherEngine : IDisposable
         }
     }
 
+    /// <summary>持锁刷新两份只读派生物:音频线程快照(_targetSnapshot)与 UI 无锁目标视图(_targetView)。</summary>
+    private void RefreshTargetViewsLocked()
+    {
+        _targetSnapshot = _targets.ToArray();
+        _targetView = new Dictionary<string, TargetOutput>(_targetById);
+    }
+
     /// <summary>计划启动目标(锁内纯检查+调度;真实 COM 启动在后台执行器)。</summary>
     private void TryStartTargetLocked(string deviceId)
     {
@@ -501,7 +513,7 @@ public sealed class DispatcherEngine : IDisposable
                 }
                 _targets.Add(target);
                 _targetById[deviceId] = target;
-                _targetSnapshot = _targets.ToArray(); // 持锁刷新音频线程快照
+                RefreshTargetViewsLocked();
                 target.MasterGain = _masterMuted || _masterVol <= 0f ? 0f : _masterVol;
                 _startingIds.Remove(deviceId);
                 ClearBackoffLocked(deviceId);
@@ -598,6 +610,7 @@ public sealed class DispatcherEngine : IDisposable
     private CancellationTokenSource? _forwardCts;
     private Task? _forwardTask;
     private long _forwardDroppedFrames;
+    private long _forwardDroppedSeen;
     private DateTime _lastForwardDropWarnUtc = DateTime.MinValue;
 
     /// <summary>一块待转发样本(池化缓冲,消费方负责归还)。Samples 为 float 样本数(帧数×2)。</summary>
@@ -605,18 +618,6 @@ public sealed class DispatcherEngine : IDisposable
 
     /// <summary>转发队列满丢弃的累计帧数(仅极端卡顿时非零)。</summary>
     public long ForwardDroppedFrames => Interlocked.Read(ref _forwardDroppedFrames);
-
-    /// <summary>队列满丢块限频告警(10s 一次,避免刷屏)。</summary>
-    private void WarnForwardDropThrottled()
-    {
-        var now = DateTime.UtcNow;
-        if (now - _lastForwardDropWarnUtc < TimeSpan.FromSeconds(10))
-        {
-            return;
-        }
-        _lastForwardDropWarnUtc = now;
-        AppLog.Warn($"转发队列拥塞丢块,累计丢弃 {Interlocked.Read(ref _forwardDroppedFrames)} 帧");
-    }
 
     private void StartForwardLoopLocked()
     {
@@ -764,7 +765,7 @@ public sealed class DispatcherEngine : IDisposable
         if (_targetById.Remove(deviceId, out var t))
         {
             _targets.Remove(t);
-            _targetSnapshot = _targets.ToArray(); // 持锁刷新音频线程快照
+            RefreshTargetViewsLocked();
             _stoppedAtUtc[deviceId] = DateTime.UtcNow;
             AppLog.Info($"目标停止({reason}): {deviceId}");
             // Dispose(COM)在后台执行器释放,锁内不碰音频
@@ -1116,6 +1117,16 @@ public sealed class DispatcherEngine : IDisposable
             SetTargetsLogicalSilent(true);
             AppLog.Warn("源无声音内容超过 1s(无应用在播放),进入逻辑静默(转发持续)");
         }
+
+        // 3) 转发队列拥塞:丢块计数在捕获回调线程累加,此处(时钟线程)限频告警,
+        //    避免在捕获回调上做同步文件 I/O
+        var dropped = Interlocked.Read(ref _forwardDroppedFrames);
+        if (dropped != _forwardDroppedSeen && now - _lastForwardDropWarnUtc >= TimeSpan.FromSeconds(10))
+        {
+            _forwardDroppedSeen = dropped;
+            _lastForwardDropWarnUtc = now;
+            AppLog.Warn($"转发队列拥塞丢块,累计丢弃 {dropped} 帧");
+        }
     }
 
     private void TryRestartSourceLocked()
@@ -1154,7 +1165,7 @@ public sealed class DispatcherEngine : IDisposable
             toDispose = _targets.Cast<IDisposable>().ToList();
             _targets.Clear();
             _targetById.Clear();
-            _targetSnapshot = System.Array.Empty<TargetOutput>();
+            RefreshTargetViewsLocked();
             if (_source != null)
             {
                 _source.SamplesReady -= OnSamplesReady;
