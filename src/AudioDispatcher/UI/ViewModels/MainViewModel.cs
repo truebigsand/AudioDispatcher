@@ -117,6 +117,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
             row.Format = c.Format;
             row.IsPresent = c.Present;
+            // 勾选状态以设置(引擎配置的事实源)为准回显:托盘"启用/停用全部"等
+            // 不经过行交互的路径改了 cfg.Enabled,这里负责同步到已有行
+            row.IsChecked = _settings.Targets.FirstOrDefault(t => t.DeviceId == c.Id)?.Enabled ?? false;
             row.Error = c.Present ? (_engine.GetError(c.Id) ?? "") : "设备已断开(插回后自动恢复)";
             row.Stats = "";
             row.Level = 0;

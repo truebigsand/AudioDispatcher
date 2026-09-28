@@ -25,10 +25,9 @@ public partial class MainWindow : Window
     private DateTime _lastHeartbeatUtc = DateTime.MinValue;
     private readonly Dictionary<string, double> _pendingVolumes = new();
     private bool _volumeSyncRunning;
+    private int _volumeSyncStuckCount;
+    private DateTime _volumeSyncPausedUntilUtc = DateTime.MinValue;
     private bool _suppressRowEvents;
-
-    /// <summary>退出流程置真后,Closing 不再最小化到托盘。</summary>
-    public bool AllowClose { get; set; }
 
     public MainWindow(DispatcherEngine engine, AppSettings settings)
     {
@@ -110,6 +109,11 @@ public partial class MainWindow : Window
         {
             return;
         }
+        // 连续挂起后的暂停期:挂起的 COM 任务无法中止,只能停止派生新任务防线程累积
+        if (DateTime.UtcNow < _volumeSyncPausedUntilUtc)
+        {
+            return;
+        }
         _volumeSyncRunning = true;
         var rows = _vm.Devices.Where(r => r.IsPresent).Select(r => (Row: r, r.Id)).ToList();
         var sync = Task.Run(() =>
@@ -122,21 +126,37 @@ public partial class MainWindow : Window
             }
             return results;
         });
-#pragma warning disable CS4014 // fire-and-forget:超时由 RunVolumeSyncWaiter 内部处理
         _ = RunVolumeSyncWaiter(sync);
-#pragma warning restore CS4014
     }
 
     private async Task RunVolumeSyncWaiter(Task<List<(UI.ViewModels.DeviceRowViewModel Row, double Vol, bool Muted)>> sync)
     {
         var done = await Task.WhenAny(sync, Task.Delay(4000));
-        Dispatcher.BeginInvoke(() =>
+        _ = Dispatcher.BeginInvoke(() =>
         {
             _volumeSyncRunning = false;
-            if (done == sync)
+            if (done != sync)
+            {
+                // 超时:挂起的后台任务自生自灭,下轮重试;连续挂起则暂停周期同步
+                if (++_volumeSyncStuckCount >= 3)
+                {
+                    _volumeSyncStuckCount = 0;
+                    _volumeSyncPausedUntilUtc = DateTime.UtcNow.AddSeconds(60);
+                    AppLog.Warn("设备音量同步连续挂起,暂停 60s");
+                }
+                return;
+            }
+            _volumeSyncStuckCount = 0;
+            _suppressRowEvents = true;
+            try
             {
                 foreach (var (row, vol, muted) in sync.Result)
                 {
+                    // 用户刚拖动、提交尚在途:不让旧设备值回踢滑块
+                    if (_pendingVolumes.ContainsKey(row.Id))
+                    {
+                        continue;
+                    }
                     if (Math.Abs(row.Volume - vol) > 0.5)
                     {
                         row.Volume = vol;
@@ -147,7 +167,12 @@ public partial class MainWindow : Window
                     }
                 }
             }
-            // 超时:放弃本轮(挂起的后台线程自生自灭),下轮重试
+            finally
+            {
+                // 抑制事件级联:回写行值会触发 slider.ValueChanged,
+                // 否则同一音量被原样再提交一次并触发多余落盘
+                _suppressRowEvents = false;
+            }
         });
     }
 
@@ -212,7 +237,7 @@ public partial class MainWindow : Window
 
     private void OnClosing(object? sender, CancelEventArgs e)
     {
-        if (!AllowClose && _settings.MinimizeToTray)
+        if (_settings.MinimizeToTray)
         {
             e.Cancel = true;
             Hide();
@@ -283,7 +308,8 @@ public partial class MainWindow : Window
             return;
         }
         // 与已应用源相同(自动恢复/重复刷新)→ 不打扰运行状态
-        var applied = _engine.Source?.Device.ID;
+        // 用缓存 DeviceId,不碰 MMDevice COM 引用(熄屏/驱动重载后 RCW 可能失效)
+        var applied = _engine.Source?.DeviceId;
         if (src.Id == _settings.SourceDeviceId && (applied == null || applied == src.Id))
         {
             return;
