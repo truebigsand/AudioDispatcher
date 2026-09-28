@@ -68,7 +68,10 @@ public static class SettingsService
         {
             var dir = System.IO.Path.GetDirectoryName(FilePath)!;
             Directory.CreateDirectory(dir);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(settings, JsonOptions));
+            // 临时文件 + 原子替换:中途崩溃/断电不会留下截断的 settings.json
+            var tmp = FilePath + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(settings, JsonOptions));
+            File.Move(tmp, FilePath, overwrite: true);
         }
         catch (Exception ex)
         {
@@ -86,16 +89,5 @@ public static class SettingsService
         }
         s.Targets ??= new();
         s.BlockedDeviceNames ??= new();
-        foreach (var t in s.Targets)
-        {
-            if (t.Volume < 0)
-            {
-                t.Volume = 0;
-            }
-            if (t.Volume > 1.5)
-            {
-                t.Volume = 1.5;
-            }
-        }
     }
 }

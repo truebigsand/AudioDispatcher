@@ -31,11 +31,9 @@ public sealed class AppSettings
     public double WindowHeight { get; set; } = 680;
 }
 
+/// <summary>单目标设备的持久化配置(是否参与分发)。音量/静音直接作用于系统端点,不在此持久化。</summary>
 public sealed class TargetSetting
 {
     public required string DeviceId { get; set; }
     public bool Enabled { get; set; }
-    /// <summary>0–1 映射音量滑块 0–150%,允许 &gt;1。</summary>
-    public double Volume { get; set; } = 1.0;
-    public bool Muted { get; set; }
 }
