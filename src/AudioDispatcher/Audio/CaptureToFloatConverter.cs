@@ -4,7 +4,7 @@ using NAudio.Wave;
 namespace AudioDispatcher.Audio;
 
 /// <summary>
-/// 捕获字节流 → 2ch float32 交织。通道数 >2 时按全部通道平均下混;
+/// 捕获字节流 → 2ch float32 交织。通道数 >2 时取前两声道(FL/FR),其余声道丢弃;
 /// 32bit 容器按 IEEE float 处理(PCM32 极罕见)。
 /// </summary>
 public sealed class CaptureToFloatConverter

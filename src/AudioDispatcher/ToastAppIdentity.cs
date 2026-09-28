@@ -49,15 +49,23 @@ internal static class ToastAppIdentity
         // 启动失败且 Toast 身份解析指向旧路径。写入量极小,不值得做差异检测。
         var shellLink = (IShellLinkW)new ShellLinkRCW();
         shellLink.SetPath(exe);
-        shellLink.SetWorkingDirectory(Path.GetDirectoryName(exe!));
+        shellLink.SetWorkingDirectory(Path.GetDirectoryName(exe) ?? string.Empty);
         shellLink.SetIconLocation(exe, 0);
 
         // System.AppUserModel.ID = AumId
         var key = new PropertyKey(new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), 5);
         var store = (IPropertyStore)shellLink;
+        // SetValue 按约定复制值,PROPVARIANT 内的堆内存由调用方释放
         var pv = PropVariant.FromString(AumId);
-        store.SetValue(ref key, ref pv);
-        store.Commit();
+        try
+        {
+            store.SetValue(ref key, ref pv);
+            store.Commit();
+        }
+        finally
+        {
+            pv.Free();
+        }
 
         ((IPersistFile)shellLink).Save(lnk, fRemember: true);
         AppLog.Info($"通知身份快捷方式已就绪: {lnk}");
@@ -138,6 +146,16 @@ internal static class ToastAppIdentity
                 _vt = VtLpwstr,
                 _pointer = Marshal.StringToCoTaskMemUni(value),
             };
+        }
+
+        /// <summary>释放 FromString 分配的非托管字符串内存。</summary>
+        public void Free()
+        {
+            if (_pointer != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(_pointer);
+                _pointer = IntPtr.Zero;
+            }
         }
     }
 }
