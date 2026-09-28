@@ -99,6 +99,7 @@ public sealed class SampleRingBuffer
         Volatile.Write(ref _readFrame, rf + n);
     }
 
+    /// <summary>清空缓冲(读写指针同时归零)。会破坏单写单读约定,调用方必须与读端互斥(TargetOutput 以 _sync 保证)。</summary>
     public void Clear()
     {
         Volatile.Write(ref _readFrame, 0);

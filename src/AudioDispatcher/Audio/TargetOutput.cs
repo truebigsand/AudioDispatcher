@@ -9,7 +9,8 @@ namespace AudioDispatcher.Audio;
 /// <summary>
 /// 单个目标设备的完整渲染流:环形缓冲 + (重采样) + 位深/声道转换 + WasapiOut 事件驱动渲染。
 /// 写端唯一:捕获线程 WriteSamples(经 _sync 锁,测试音写入也走同一锁);
-/// 读端唯一:WasapiOut 事件回调线程(RingReadProvider.Read,含漂移补偿)。
+/// 读端唯一:WasapiOut 事件回调线程(RingReadProvider.Read,含漂移补偿,同样经 _sync,
+/// 与测试音的 ring 清空互斥——Clear 归零读写指针,无锁并发下读端会把旧读指针写回)。
 /// </summary>
 public sealed class TargetOutput : IDisposable
 {
@@ -210,24 +211,27 @@ public sealed class TargetOutput : IDisposable
         {
             var frames = count / 2;
             var cap = _ring.CapacityFrames;
-
-            // 溢出补偿:水位高于 92% 容量时丢弃最旧帧至 85% 水位
-            var avail = _ring.AvailableFrames;
-            if (avail > cap * 0.92f)
+            int got;
+            // 水位补偿与读取经 _sync 与写端/测试音清空互斥:Clear 会归零读写指针,
+            // 无锁并发下读端可能把清零前的旧读指针写回,读写指针永久错位(目标长期静音)。
+            lock (_owner._sync)
             {
-                var drop = avail - (int)(cap * 0.85f);
-                if (drop > 0)
+                var avail = _ring.AvailableFrames;
+                if (avail > cap * 0.92f)
                 {
-                    _ring.SkipOldest(drop);
-                    if (!_owner.SilentMode) // 逻辑静默期丢的是静音样本,不计入统计
+                    var drop = avail - (int)(cap * 0.85f);
+                    if (drop > 0)
                     {
-                        Interlocked.Add(ref _owner.OverrunFrames, drop);
+                        _ring.SkipOldest(drop);
+                        if (!_owner.SilentMode) // 逻辑静默期丢的是静音样本,不计入统计
+                        {
+                            Interlocked.Add(ref _owner.OverrunFrames, drop);
+                        }
                     }
-                    avail -= drop;
                 }
-            }
 
-            var got = _ring.Read(buffer, offset / 2, frames);
+                got = _ring.Read(buffer, offset / 2, frames);
+            }
             if (got < frames)
             {
                 // 欠载:补静音(逻辑静默期补的也是静音,不计入统计)
