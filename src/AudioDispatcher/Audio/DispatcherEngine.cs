@@ -12,7 +12,7 @@ namespace AudioDispatcher.Audio;
 /// 分发编排核心。
 /// - 运行状态机:SetRunning 启动/停止捕获与全部已启用目标;
 /// - 数据路径:SourceCapture.SamplesReady → 各 TargetOutput.WriteSamples(捕获线程),
-///   并按块级 RMS 即时退出静默(避免丢下一段内容开头);
+///   转发永不门控;检测到内容块时仅即时清除逻辑静默标志;
 /// - watchdog(500ms):源数据停止检测(进入静默/重建捕获)、设备热插拔刷新、断线目标自动处置;
 /// - UI 通过事件感知结构变化,通过轮询快照读实时值(电平/统计)。
 /// 线程纪律:_lock 保护结构;volatile 保护状态标志;渲染/捕获线程只经各自对象锁。
@@ -176,6 +176,7 @@ public sealed class DispatcherEngine : IDisposable
             _lastDataUtc = DateTime.UtcNow;
             _lastContentUtc = DateTime.UtcNow;
             _silent = false;
+            SetTargetsLogicalSilent(false);
             AppLog.Info($"分发启动: {_targets.Count} 个目标设备, 缓冲 {_bufferMs}ms");
             return true;
         }
@@ -685,6 +686,15 @@ public sealed class DispatcherEngine : IDisposable
 
     // ================= 数据与看门狗 =================
 
+    /// <summary>把逻辑静默标志推送到全部运行目标(渲染端据此抑制丢/补计数,与 MasterGain 同为推送模式)。</summary>
+    private void SetTargetsLogicalSilent(bool silent)
+    {
+        foreach (var t in _targetSnapshot)
+        {
+            t.SilentMode = silent;
+        }
+    }
+
     private void OnSamplesReady(float[] samples, int count, float chunkRms)
     {
         // 无锁路径:快照由结构变更方在持锁时刷新
@@ -694,16 +704,13 @@ public sealed class DispatcherEngine : IDisposable
             return;
         }
         _lastDataUtc = DateTime.UtcNow;
-        // 静默中检测到当前块含内容:在写入前即时退出静默,保证下一段内容开头不丢
-        // (看门狗 250ms 窗口 + 500ms 节拍的双重滞后会丢 0.25~0.75s)。退出幂等,与看门狗并发安全。
+        // 静默中检测到当前块含内容:立即清除逻辑静默标志(仅翻标志+日志,
+        // 转发本就持续,无数据操作),让 UI"等待音频数据"提示即时退出
         if (_silent && chunkRms > SilentRmsThreshold)
         {
             _silent = false;
-            foreach (var t in targets)
-            {
-                t.ResumeFromSilence();
-            }
-            AppLog.Info("源声音内容恢复,数据路径即时退出静默");
+            SetTargetsLogicalSilent(false);
+            AppLog.Info("源声音内容恢复,退出逻辑静默");
         }
         var frames = count / 2;
         foreach (var t in targets)
@@ -963,8 +970,8 @@ public sealed class DispatcherEngine : IDisposable
             _lastDataUtc = now;
         }
 
-        // 2) 内容级静默:帧在流动但都是静音(如无应用播放)→ 目标静默。
-        //    退出判定通常已由数据路径即时完成,这里仅兜底(块级 RMS 偏低但 250ms 窗口达阈值的极轻内容)。
+        // 2) 内容级静默(纯逻辑状态):帧在流动但都是静音(如无应用在播放)→
+        //    仅置标志(UI"等待音频数据"提示 + 渲染端抑制丢/补计数),转发持续直通不中断。
         var hasContent = _source.LastLevelRms > SilentRmsThreshold;
         if (hasContent)
         {
@@ -972,21 +979,15 @@ public sealed class DispatcherEngine : IDisposable
             if (_silent)
             {
                 _silent = false;
-                foreach (var t in _targets)
-                {
-                    t.ResumeFromSilence();
-                }
-                AppLog.Info("源声音内容恢复(看门狗兜底),退出静默");
+                SetTargetsLogicalSilent(false);
+                AppLog.Info("源声音内容恢复(看门狗),退出逻辑静默");
             }
         }
         else if (!_silent && now - _lastContentUtc > TimeSpan.FromSeconds(1))
         {
             _silent = true;
-            foreach (var t in _targets)
-            {
-                t.EnterSilentMode();
-            }
-            AppLog.Warn("源无声音内容超过 1s(无应用在播放),目标进入静默");
+            SetTargetsLogicalSilent(true);
+            AppLog.Warn("源无声音内容超过 1s(无应用在播放),进入逻辑静默(转发持续)");
         }
     }
 
@@ -1004,6 +1005,7 @@ public sealed class DispatcherEngine : IDisposable
         if (TryEnsureSourceLocked())
         {
             _silent = false;
+            SetTargetsLogicalSilent(false);
             _lastDataUtc = DateTime.UtcNow;
             if (had)
             {

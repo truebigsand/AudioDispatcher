@@ -27,7 +27,9 @@ public sealed class TargetOutput : IDisposable
     // MasterGain 例外:系统主音量(CABLE Input 端点音量,驱动直通无效)由分发器
     // 以软件增益实现,作用于全部目标(任务栏音量条/静音键由此真正生效)。
     internal volatile float MasterGain = 1f;
-    // 以下字段由 UI 线程写、渲染线程读(volatile),或经 Interlocked 累计。
+    // 以下字段由引擎写、渲染线程读(volatile),或经 Interlocked 累计。
+    // SilentMode 是纯逻辑静默(源无内容):不影响数据转发,仅让渲染端
+    // 抑制欠载/溢出计数(长空闲时时钟漂移丢补的只是静音样本,计入会刷爆统计)。
     internal volatile bool SilentMode;
     internal volatile bool CapturePaused;
     internal long OverrunFrames;
@@ -127,40 +129,16 @@ public sealed class TargetOutput : IDisposable
         }
     }
 
-    /// <summary>捕获线程写入样本(2ch 交织 float32)。SilentMode/CapturePaused 时丢弃。</summary>
+    /// <summary>捕获线程写入样本(2ch 交织 float32)。转发永不门控;仅测试音期间经 CapturePaused 短暂暂停。</summary>
     public void WriteSamples(float[] data, int frames)
     {
-        if (SilentMode || CapturePaused)
+        if (CapturePaused)
         {
             return;
         }
         lock (_sync)
         {
             _ring.Write(data, 0, frames);
-        }
-    }
-
-    /// <summary>进入静默(源无数据):清空缓冲,读端输出静音且不计数。</summary>
-    public void EnterSilentMode()
-    {
-        lock (_sync)
-        {
-            SilentMode = true;
-            _ring.Clear();
-        }
-    }
-
-    /// <summary>源恢复:清空旧数据后退出静默。</summary>
-    public void ResumeFromSilence()
-    {
-        lock (_sync)
-        {
-            if (!SilentMode)
-            {
-                return;
-            }
-            _ring.Clear();
-            SilentMode = false;
         }
     }
 
@@ -188,11 +166,7 @@ public sealed class TargetOutput : IDisposable
             tone[i * 2 + 1] = v;
         }
 
-        var wasSilent = SilentMode;
-        if (wasSilent)
-        {
-            SilentMode = false; // 静默态下读端不消费,先放行让测试音能播出
-        }
+        // 转发持续直通,读端始终消费:清 ring 后写入测试音即可,无需触碰静默标志
         lock (_sync)
         {
             CapturePaused = true;
@@ -208,23 +182,6 @@ public sealed class TargetOutput : IDisposable
                 w += n;
             }
             CapturePaused = false;
-        }
-
-        if (wasSilent)
-        {
-            // 若期间捕获没有恢复(ring 仍空),播放完测试音后回到静默,避免欠载统计暴涨。
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(500);
-                lock (_sync)
-                {
-                    if (!SilentMode && !CapturePaused && _ring.AvailableFrames == 0)
-                    {
-                        SilentMode = true;
-                        _ring.Clear();
-                    }
-                }
-            });
         }
     }
 
@@ -251,12 +208,6 @@ public sealed class TargetOutput : IDisposable
 
         public int Read(float[] buffer, int offset, int count)
         {
-            if (_owner.SilentMode)
-            {
-                Array.Clear(buffer, offset, count);
-                return count;
-            }
-
             var frames = count / 2;
             var cap = _ring.CapacityFrames;
 
@@ -268,7 +219,10 @@ public sealed class TargetOutput : IDisposable
                 if (drop > 0)
                 {
                     _ring.SkipOldest(drop);
-                    Interlocked.Add(ref _owner.OverrunFrames, drop);
+                    if (!_owner.SilentMode) // 逻辑静默期丢的是静音样本,不计入统计
+                    {
+                        Interlocked.Add(ref _owner.OverrunFrames, drop);
+                    }
                     avail -= drop;
                 }
             }
@@ -276,9 +230,12 @@ public sealed class TargetOutput : IDisposable
             var got = _ring.Read(buffer, offset / 2, frames);
             if (got < frames)
             {
-                // 欠载:补静音
+                // 欠载:补静音(逻辑静默期补的也是静音,不计入统计)
                 Array.Clear(buffer, offset + got * 2, (frames - got) * 2);
-                Interlocked.Add(ref _owner.UnderrunFrames, frames - got);
+                if (!_owner.SilentMode)
+                {
+                    Interlocked.Add(ref _owner.UnderrunFrames, frames - got);
+                }
             }
 
             // 系统主音量软件增益 + 电平(设备端点音量在硬件层,此处仅主增益)
