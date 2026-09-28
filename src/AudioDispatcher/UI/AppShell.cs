@@ -131,9 +131,11 @@ public sealed class AppShell
         var now = DateTime.UtcNow;
         if (now - _lastBalloonUtc < TimeSpan.FromSeconds(8))
         {
+            AppLog.Info($"气泡被 8s 节流跳过: {title} {message}");
             return;
         }
         _lastBalloonUtc = now;
+        AppLog.Info($"托盘气泡: {title} {message}");
         _tray.Balloon(title, message, icon);
     }
 
