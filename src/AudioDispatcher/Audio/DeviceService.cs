@@ -153,15 +153,6 @@ public sealed class DeviceService : IDisposable
         }
     }
 
-    /// <summary>当前处于 Active 状态的渲染端点 ID 集合(看门狗巡检用,轻量,不含格式描述)。</summary>
-    public HashSet<string> GetActiveRenderIds()
-    {
-        lock (_comLock)
-        {
-            return ActiveRenderIdsCore();
-        }
-    }
-
     private HashSet<string> ActiveRenderIdsCore()
     {
         var active = new HashSet<string>();

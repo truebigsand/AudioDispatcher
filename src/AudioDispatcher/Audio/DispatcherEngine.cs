@@ -612,9 +612,6 @@ public sealed class DispatcherEngine : IDisposable
     /// <summary>一块待转发样本(池化缓冲,消费方负责归还)。Samples 为 float 样本数(帧数×2)。</summary>
     private readonly record struct ForwardBlock(float[] Buffer, int Samples, float ChunkRms);
 
-    /// <summary>转发队列满丢弃的累计帧数(仅极端卡顿时非零)。</summary>
-    public long ForwardDroppedFrames => Interlocked.Read(ref _forwardDroppedFrames);
-
     private void StartForwardLoopLocked()
     {
         if (_forwardTask != null)

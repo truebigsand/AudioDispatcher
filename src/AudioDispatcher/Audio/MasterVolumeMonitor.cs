@@ -57,27 +57,6 @@ public sealed class MasterVolumeMonitor : IDisposable
         }
     }
 
-    /// <summary>立即读取当前主音量并广播(供启动/设备切换后初始化)。调用方持 _sync 之外任意线程。</summary>
-    public void ReadCurrent()
-    {
-        AudioEndpointVolume? vol = null;
-        lock (_sync)
-        {
-            vol = _volume;
-        }
-        if (vol != null)
-        {
-            try
-            {
-                Changed?.Invoke(vol.MasterVolumeLevelScalar, vol.Mute);
-            }
-            catch (Exception)
-            {
-                // 忽略订阅方异常
-            }
-        }
-    }
-
     /// <summary>换绑默认端点(或传 null 解除绑定)。调用方须持 _sync。</summary>
     private void SwapLocked(MMDevice? newDevice)
     {

@@ -39,10 +39,6 @@ public static class Program
                 {
                     showRequested.WaitOne();
                 }
-                catch (AbandonedMutexException)
-                {
-                    return;
-                }
                 catch (ObjectDisposedException)
                 {
                     return;
