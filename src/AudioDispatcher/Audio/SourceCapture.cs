@@ -17,7 +17,7 @@ public sealed class SourceCapture : IDisposable
     private readonly object _sync = new();
     private WasapiCapture? _capture;
     private CaptureToFloatConverter? _converter;
-    private float[] _outBuf = new float[0];
+    private float[] _outBuf = Array.Empty<float>();
     private long _totalFrames;
     private bool _running;
     private double _rmsAcc;

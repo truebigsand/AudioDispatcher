@@ -72,6 +72,7 @@ internal static class ToastAppIdentity
     }
 
     [DllImport("shell32.dll", SetLastError = false)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern int SetCurrentProcessExplicitAppUserModelID(
         [MarshalAs(UnmanagedType.LPWStr)] string appID);
 

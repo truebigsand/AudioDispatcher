@@ -33,8 +33,8 @@ public sealed class DispatcherEngine : IDisposable
     private SourceCapture? _source;
     private readonly List<TargetOutput> _targets = new();
     private readonly Dictionary<string, TargetOutput> _targetById = new();
-    private List<RenderInfo> _candidates = new();
-    private List<SourceInfo> _sourceCandidates = new();
+    private volatile List<RenderInfo> _candidates = new();
+    private volatile List<SourceInfo> _sourceCandidates = new();
     private string _candidatesSig = "";
     private string _sourceSig = "";
     private HashSet<string> _lastPresentIds = new(); // 上次刷新时在线端点(检测"恢复"转换)
@@ -231,7 +231,7 @@ public sealed class DispatcherEngine : IDisposable
             {
                 StopTargetLocked(deviceId, "停用");
             }
-            else if (_running && _targetById.ContainsKey(deviceId) == false)
+            else if (_running && !_targetById.ContainsKey(deviceId))
             {
                 TryStartTargetLocked(deviceId);
             }
@@ -1183,6 +1183,11 @@ public sealed class DispatcherEngine : IDisposable
                     catch { }
                 }
             });
+        }
+        // 转发线程已停:清掉通道内未消费的残留块,归还池化缓冲
+        while (_forwardChannel.Reader.TryRead(out var stale))
+        {
+            ArrayPool<float>.Shared.Return(stale.Buffer);
         }
     }
 }

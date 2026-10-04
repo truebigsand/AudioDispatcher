@@ -339,7 +339,7 @@ public partial class MainWindow : Window
 
     // ═══════════════════ 设备行交互 ═══════════════════
 
-    private DeviceRowViewModel? RowOf(object sender) =>
+    private static DeviceRowViewModel? RowOf(object sender) =>
         (sender as FrameworkElement)?.DataContext as DeviceRowViewModel;
 
     private void OnRowChecked(object sender, RoutedEventArgs e)

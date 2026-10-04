@@ -15,7 +15,7 @@ public sealed class FloatToDeviceProvider : IWaveProvider
     private readonly int _outputChannels;
     private readonly int _bytesPerSample;
     private readonly bool _isFloat;
-    private float[] _srcScratch = new float[0];
+    private float[] _srcScratch = Array.Empty<float>();
 
     public FloatToDeviceProvider(ISampleProvider source, WaveFormat outputFormat)
     {

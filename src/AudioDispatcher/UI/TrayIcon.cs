@@ -160,6 +160,7 @@ public sealed class TrayIcon : IDisposable
     private static class NativeMethods
     {
         [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        [System.Runtime.InteropServices.DefaultDllImportSearchPaths(System.Runtime.InteropServices.DllImportSearchPath.System32)]
         public static extern bool DestroyIcon(IntPtr hIcon);
     }
 }
