@@ -89,5 +89,7 @@ public static class SettingsService
         }
         s.Targets ??= new();
         s.BlockedDeviceNames ??= new();
+        // 空串会命中所有设备名的 Contains,把过滤规则变成"排除一切"
+        s.BlockedDeviceNames.RemoveAll(string.IsNullOrWhiteSpace);
     }
 }

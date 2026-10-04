@@ -372,10 +372,11 @@ public sealed class DispatcherEngine : IDisposable
     /// <summary>后台执行器:打开并启动源捕获(COM,可能挂起,只影响执行器队列)。</summary>
     private void DoEnsureSource(string deviceId)
     {
+        MMDevice? device = null;
         SourceCapture? source = null;
         try
         {
-            var device = _devices.OpenSourceDevice(deviceId);
+            device = _devices.OpenSourceDevice(deviceId);
             if (device == null)
             {
                 AppLog.Warn("源设备打开失败(后台),将按看门狗节奏重试");
@@ -388,9 +389,10 @@ public sealed class DispatcherEngine : IDisposable
             {
                 if (_source != null)
                 {
-                    // 竞态:已有源就绪,释放本次创建的
+                    // 竞态:已有源就绪,释放本次创建的(连带其 device)
                     var s = source;
                     source = null;
+                    device = null;
                     EnqueueAudioOp(() =>
                     {
                         try { s.Dispose(); }
@@ -400,6 +402,7 @@ public sealed class DispatcherEngine : IDisposable
                 }
                 _source = source;
                 source = null;
+                device = null;
                 if (_running)
                 {
                     _lastDataUtc = DateTime.UtcNow;
@@ -410,9 +413,18 @@ public sealed class DispatcherEngine : IDisposable
         catch (Exception ex)
         {
             AppLog.Warn($"源捕获启动失败(后台): {ex.Message}");
+        }
+        finally
+        {
+            // SourceCapture.Dispose 连带释放 device;构造失败时兜底释放 device 本身
             if (source != null)
             {
                 try { source.Dispose(); }
+                catch { }
+            }
+            else if (device != null)
+            {
+                try { device.Dispose(); }
                 catch { }
             }
         }

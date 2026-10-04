@@ -4,8 +4,8 @@ using NAudio.Wave;
 namespace AudioDispatcher.Audio;
 
 /// <summary>
-/// 捕获字节流 → 2ch float32 交织。通道数 >2 时取前两声道(FL/FR),其余声道丢弃;
-/// 32bit 容器按 IEEE float 处理(PCM32 极罕见)。
+/// 捕获字节流 → 2ch float32 交织。单声道复制到双声道;通道数 >2 时取前两声道
+/// (FL/FR),其余声道丢弃;32bit 容器按 IEEE float 处理(PCM32 极罕见)。
 /// </summary>
 public sealed class CaptureToFloatConverter
 {
@@ -41,7 +41,13 @@ public sealed class CaptureToFloatConverter
         {
             float l;
             float r;
-            if (_channels == 2)
+            if (_channels == 1)
+            {
+                // 单声道源:复制到双声道,避免读到下一帧/越界
+                l = r = ReadSample(src, p, _bytesPerSample, _isFloat);
+                p += _bytesPerSample;
+            }
+            else if (_channels == 2)
             {
                 l = ReadSample(src, p, _bytesPerSample, _isFloat);
                 r = ReadSample(src, p + _bytesPerSample, _bytesPerSample, _isFloat);
