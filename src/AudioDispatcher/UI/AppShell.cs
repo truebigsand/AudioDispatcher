@@ -95,7 +95,9 @@ public sealed class AppShell
 
     private void SetAllTargets(bool enabled)
     {
-        // 启停涉及音频 COM,放后台线程(熄屏唤醒瞬间 Activate 可能挂起)
+        // 启停涉及音频 COM,放后台线程(熄屏唤醒瞬间 Activate 可能挂起);
+        // 保存排到启停完成后的 UI 线程:SetTargetEnabled 可能新增 TargetSetting,
+        // 与 UI 线程 JSON 序列化并发读写同一 List
         var ids = _engine.Candidates.Where(c => c.Present).Select(c => c.Id).ToList();
         _ = System.Threading.Tasks.Task.Run(() =>
         {
@@ -103,8 +105,8 @@ public sealed class AppShell
             {
                 _engine.SetTargetEnabled(id, enabled);
             }
+            DispatchUi(() => SettingsService.Save(_settings));
         });
-        SettingsService.Save(_settings);
     }
 
     private void OnPauseToggle()
